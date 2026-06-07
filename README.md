@@ -60,12 +60,12 @@ Default language:
 - MultiAddonManager config path: game\csgo\cfg\multiaddonmanager
 
 ```
-mm_extra_addons 				"3724637448"
+mm_extra_addons  "3724637448"
 ```
 
 - if you want to add multiple addons in MultiAddonManager
 ```
-mm_extra_addons 				"3724637448,3738685756"
+mm_extra_addons  "3724637448,3738685756"
 ```
 ## notice
 - about the workshop map you do not need to Subscribe manually MultiAddonManager will do everything for you
