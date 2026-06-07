@@ -74,7 +74,7 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
         RegisterEventHandler<EventRoundStart>(OnRoundStart);
         RegisterEventHandler<EventPlayerDisconnect>(OnPlayerDisconnect);
 
-        AddCommand("css_cs2faceitlevels_refresh", "Refresh FACEIT pins for all players (server console only).", OnRefreshCommand);
+        AddCommand("css_cs2faceitlevels_refresh", "Refresh FACEIT pins for all players.", OnRefreshCommand);
 
         if (Config.EnableEloCommands)
         {
