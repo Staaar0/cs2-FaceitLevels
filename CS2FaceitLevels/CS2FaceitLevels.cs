@@ -101,11 +101,21 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
     {
         foreach (var player in GetPlayers())
         {
-            if (_applied.TryGetValue(player.SteamID, out var rank)
-                && player.InventoryServices is { } inventory
-                && inventory.Rank[5] != rank)
+            if (player.InventoryServices is not { } inventory)
+                continue;
+
+            if (_applied.TryGetValue(player.SteamID, out var rank))
             {
-                inventory.Rank[5] = rank;
+                if (inventory.Rank[5] != rank)
+                {
+                    inventory.Rank[5] = rank;
+                    Utilities.SetStateChanged(player, "CCSPlayerController", "m_pInventoryServices");
+                }
+            }
+            else if (_cache.TryGetValue(player.SteamID, out var data) && data.Level == 0
+                && LevelPins.ContainsValue((int)inventory.Rank[5]))
+            {
+                inventory.Rank[5] = MedalRank_t.MEDAL_RANK_NONE;
                 Utilities.SetStateChanged(player, "CCSPlayerController", "m_pInventoryServices");
             }
         }
