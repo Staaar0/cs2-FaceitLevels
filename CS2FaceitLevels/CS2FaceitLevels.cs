@@ -18,7 +18,7 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
 {
     public override string ModuleName => "CS2FaceitLevels";
     public override string ModuleAuthor => "✪ Stαr";
-    public override string ModuleVersion => "1.0.5";
+    public override string ModuleVersion => "1.0.6";
     public override string ModuleDescription => "Shows real FACEIT levels in the CS2 scoreboard.";
 
     private const string DefaultApiKey = "PUT_YOUR_FACEIT_API_KEY_HERE";
@@ -51,6 +51,7 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
 
     private readonly ConcurrentDictionary<ulong, CachedData> _cache = new();
     private readonly ConcurrentDictionary<ulong, byte> _fetching = new();
+    private readonly Dictionary<ulong, MedalRank_t> _applied = new();
 
     private CS2FaceitLevelsLang _lang = new();
 
@@ -74,7 +75,7 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
         RegisterEventHandler<EventRoundStart>(OnRoundStart);
         RegisterEventHandler<EventPlayerDisconnect>(OnPlayerDisconnect);
 
-        AddCommand("css_cs2faceitlevels_refresh", "Refresh FACEIT pins for all players.", OnRefreshCommand);
+        RegisterListener<Listeners.OnTick>(OnTick);
 
         if (Config.EnableEloCommands)
         {
@@ -96,10 +97,27 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
         return HookResult.Continue;
     }
 
+    private void OnTick()
+    {
+        foreach (var player in GetPlayers())
+        {
+            if (_applied.TryGetValue(player.SteamID, out var rank)
+                && player.InventoryServices is { } inventory
+                && inventory.Rank[5] != rank)
+            {
+                inventory.Rank[5] = rank;
+                Utilities.SetStateChanged(player, "CCSPlayerController", "m_pInventoryServices");
+            }
+        }
+    }
+
     private HookResult OnPlayerDisconnect(EventPlayerDisconnect e, GameEventInfo info)
     {
         if (e.Userid is { } player && player.SteamID != 0)
+        {
             _fetching.TryRemove(player.SteamID, out _);
+            _applied.Remove(player.SteamID);
+        }
         return HookResult.Continue;
     }
 
@@ -172,13 +190,16 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
         if (player.InventoryServices == null)
             return;
 
+        MedalRank_t rank;
         if (data.Level >= 1 && LevelPins.TryGetValue(data.Level, out var pin))
-            player.InventoryServices.Rank[5] = (MedalRank_t)pin;
+            rank = (MedalRank_t)pin;
         else if (Config.ClearPinWhenNoFaceit)
-            player.InventoryServices.Rank[5] = MedalRank_t.MEDAL_RANK_NONE;
+            rank = MedalRank_t.MEDAL_RANK_NONE;
         else
             return;
 
+        _applied[player.SteamID] = rank;
+        player.InventoryServices.Rank[5] = rank;
         Utilities.SetStateChanged(player, "CCSPlayerController", "m_pInventoryServices");
 
         if (Config.Debug)
@@ -254,18 +275,6 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
     }
 
     private CachedData NoFaceit() => new(0, null, DateTime.UtcNow.AddMinutes(Config.CacheMinutes));
-
-    private void OnRefreshCommand(CCSPlayerController? player, CommandInfo command)
-    {
-        if (player != null)
-        {
-            command.ReplyToCommand("[CS2FaceitLevels] This command can only be run from the server console.");
-            return;
-        }
-
-        RefreshAll(force: true);
-        command.ReplyToCommand("[CS2FaceitLevels] Refreshing FACEIT levels for all players.");
-    }
 
     private void OnEloCommand(CCSPlayerController? caller, CommandInfo command)
     {
