@@ -62,8 +62,3 @@ Default language:
 ```
 mm_extra_addons  "3724637448"
 ```
-
-- if you want to add multiple addons in MultiAddonManager
-```
-mm_extra_addons  "3724637448,3738685756"
-```
