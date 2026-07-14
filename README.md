@@ -61,4 +61,5 @@ Default language:
 
 ```
 mm_extra_addons  "3724637448"
+mm_client_extra_addons "3724637448"
 ```
