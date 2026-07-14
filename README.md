@@ -60,6 +60,5 @@ Default language:
 - MultiAddonManager config path: game\csgo\cfg\multiaddonmanager
 
 ```
-mm_extra_addons  "3724637448"
 mm_client_extra_addons "3724637448"
 ```
