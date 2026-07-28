@@ -106,7 +106,6 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
         RegisterEventHandler<EventPlayerDisconnect>(OnPlayerDisconnect);
 
         RegisterListener<Listeners.OnTick>(EnforcePins);
-        RegisterListener<Listeners.OnServerPostEntityThink>(EnforcePins);
 
         AddTimer(60f, CleanupExpiredCache, TimerFlags.REPEAT);
 
@@ -532,7 +531,9 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
     private static IEnumerable<CCSPlayerController> GetPlayers() => Utilities.GetPlayers().Where(IsValid);
 
     private static bool IsValid([NotNullWhen(true)] CCSPlayerController? player) =>
-        player is { IsValid: true, IsBot: false, SteamID: not 0 };
+        player is { IsValid: true, IsBot: false, SteamID: not 0 }
+        && !player.IsHLTV
+        && player.Connected == PlayerConnectedState.Connected;
 
     private sealed record CachedData(int Level, int? Elo, DateTime ExpiresAt)
     {
