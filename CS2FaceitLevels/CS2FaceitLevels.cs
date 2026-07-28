@@ -55,7 +55,7 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
     private readonly ConcurrentDictionary<ulong, Lazy<Task<CachedData>>> _fetching = new();
     private readonly Dictionary<ulong, MedalRank_t> _applied = new();
     private readonly Dictionary<ulong, long> _eloCommandTimes = new();
-    private bool _pinListenersRegistered;
+    private bool _initialized;
 
     private CS2FaceitLevelsLang _lang = new();
 
@@ -73,11 +73,40 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
 
     public override void Load(bool hotReload)
     {
+        QueueInitialize();
+    }
+
+    public override void OnAllPluginsLoaded(bool hotReload)
+    {
+        QueueInitialize();
+
+        if (hotReload)
+            Server.NextFrame(() => AddTimer(2f, () => RefreshAll(force: true)));
+    }
+
+    private void QueueInitialize()
+    {
+        if (_initialized)
+            return;
+
+        Server.NextFrame(() => Server.NextFrame(Initialize));
+    }
+
+    private void Initialize()
+    {
+        if (_initialized)
+            return;
+
+        _initialized = true;
+
         RegisterEventHandler<EventPlayerConnectFull>(OnPlayerConnectFull);
         RegisterEventHandler<EventPlayerSpawn>(OnPlayerSpawn);
         RegisterEventHandler<EventPlayerTeam>(OnPlayerTeam);
         RegisterEventHandler<EventRoundStart>(OnRoundStart);
         RegisterEventHandler<EventPlayerDisconnect>(OnPlayerDisconnect);
+
+        RegisterListener<Listeners.OnTick>(EnforcePins);
+        RegisterListener<Listeners.OnServerPostEntityThink>(EnforcePins);
 
         AddTimer(60f, CleanupExpiredCache, TimerFlags.REPEAT);
 
@@ -86,23 +115,6 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
             AddCommand("css_elo", "Show a player's FACEIT elo.", OnEloCommand);
             AddCommand("css_elos", "Show every player's FACEIT elo.", OnElosCommand);
         }
-
-    }
-
-    public override void OnAllPluginsLoaded(bool hotReload)
-    {
-        Server.NextFrame(() =>
-        {
-            if (_pinListenersRegistered)
-                return;
-
-            RegisterListener<Listeners.OnTick>(EnforcePins);
-            RegisterListener<Listeners.OnServerPostEntityThink>(EnforcePins);
-            _pinListenersRegistered = true;
-
-            if (hotReload)
-                AddTimer(2f, () => RefreshAll(force: true));
-        });
     }
 
     private HookResult OnPlayerConnectFull(EventPlayerConnectFull e, GameEventInfo info) => Refresh(e.Userid, 2f);
