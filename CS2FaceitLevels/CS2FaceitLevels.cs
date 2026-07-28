@@ -18,7 +18,7 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
 {
     public override string ModuleName => "CS2FaceitLevels";
     public override string ModuleAuthor => "✪ Stαr";
-    public override string ModuleVersion => "1.0.6";
+    public override string ModuleVersion => "1.0.7";
     public override string ModuleDescription => "Shows real FACEIT levels in the CS2 scoreboard.";
 
     private const string DefaultApiKey = "PUT_YOUR_FACEIT_API_KEY_HERE";
