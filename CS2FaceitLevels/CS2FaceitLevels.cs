@@ -49,9 +49,12 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
         AllowTrailingCommas = true,
     };
 
+    private const long EloCommandCooldownMs = 200;
+
     private readonly ConcurrentDictionary<ulong, CachedData> _cache = new();
-    private readonly ConcurrentDictionary<ulong, byte> _fetching = new();
+    private readonly ConcurrentDictionary<ulong, Lazy<Task<CachedData>>> _fetching = new();
     private readonly Dictionary<ulong, MedalRank_t> _applied = new();
+    private readonly Dictionary<ulong, long> _eloCommandTimes = new();
 
     private CS2FaceitLevelsLang _lang = new();
 
@@ -75,7 +78,9 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
         RegisterEventHandler<EventRoundStart>(OnRoundStart);
         RegisterEventHandler<EventPlayerDisconnect>(OnPlayerDisconnect);
 
-        RegisterListener<Listeners.OnTick>(OnTick);
+        RegisterListener<Listeners.OnTick>(EnforcePins);
+        RegisterListener<Listeners.OnServerPostEntityThink>(EnforcePins);
+        AddTimer(60f, CleanupExpiredCache, TimerFlags.REPEAT);
 
         if (Config.EnableEloCommands)
         {
@@ -97,7 +102,7 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
         return HookResult.Continue;
     }
 
-    private void OnTick()
+    private void EnforcePins()
     {
         foreach (var player in GetPlayers())
         {
@@ -112,8 +117,7 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
                     Utilities.SetStateChanged(player, "CCSPlayerController", "m_pInventoryServices");
                 }
             }
-            else if (_cache.TryGetValue(player.SteamID, out var data) && data.Level == 0
-                && LevelPins.ContainsValue((int)inventory.Rank[5]))
+            else if (LevelPins.ContainsValue((int)inventory.Rank[5]))
             {
                 inventory.Rank[5] = MedalRank_t.MEDAL_RANK_NONE;
                 Utilities.SetStateChanged(player, "CCSPlayerController", "m_pInventoryServices");
@@ -125,8 +129,8 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
     {
         if (e.Userid is { } player && player.SteamID != 0)
         {
-            _fetching.TryRemove(player.SteamID, out _);
             _applied.Remove(player.SteamID);
+            _eloCommandTimes.Remove(player.SteamID);
         }
         return HookResult.Continue;
     }
@@ -161,38 +165,26 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
             return;
         }
 
-        if (!_fetching.TryAdd(steamId, 0))
-            return;
-
-        var name = player.PlayerName;
-        Task.Run(() => FetchAndApply(slot, steamId, name));
+        Task.Run(async () =>
+        {
+            var data = await GetOrFetch(steamId, force);
+            Server.NextFrame(() =>
+            {
+                var current = Utilities.GetPlayerFromSlot(slot);
+                if (IsValid(current) && current.SteamID == steamId)
+                    Apply(current, data);
+            });
+        });
     }
 
-    private async Task FetchAndApply(int slot, ulong steamId, string name)
+    private void CleanupExpiredCache()
     {
-        CachedData data;
-        try
+        var now = DateTime.UtcNow;
+        foreach (var entry in _cache)
         {
-            data = await FetchFromFaceit(steamId);
+            if (entry.Value.ExpiresAt <= now)
+                _cache.TryRemove(entry.Key, out _);
         }
-        catch (Exception ex)
-        {
-            Logger.LogWarning(ex, "[CS2FaceitLevels] FACEIT lookup failed for {Name} ({SteamId}).", name, steamId);
-            data = NoFaceit();
-        }
-        finally
-        {
-            _fetching.TryRemove(steamId, out _);
-        }
-
-        _cache[steamId] = data;
-
-        Server.NextFrame(() =>
-        {
-            var player = Utilities.GetPlayerFromSlot(slot);
-            if (IsValid(player) && player.SteamID == steamId)
-                Apply(player, data);
-        });
     }
 
     private void Apply(CCSPlayerController player, CachedData data)
@@ -294,6 +286,9 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
             return;
         }
 
+        if (!CanUseEloCommand(caller.SteamID))
+            return;
+
         var search = JoinArgs(command);
         if (search.Length == 0)
         {
@@ -343,6 +338,9 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
             return;
         }
 
+        if (!CanUseEloCommand(caller.SteamID))
+            return;
+
         var callerSlot = caller.Slot;
         var targets = GetPlayers()
             .OrderBy(p => p.TeamNum)
@@ -368,11 +366,31 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
         });
     }
 
-    private async Task<CachedData> GetOrFetch(ulong steamId)
+    private Task<CachedData> GetOrFetch(ulong steamId, bool force = false)
     {
-        if (_cache.TryGetValue(steamId, out var cached) && cached.ExpiresAt > DateTime.UtcNow)
-            return cached;
+        if (!force && _cache.TryGetValue(steamId, out var cached) && cached.ExpiresAt > DateTime.UtcNow)
+            return Task.FromResult(cached);
 
+        var request = _fetching.GetOrAdd(steamId, id => new Lazy<Task<CachedData>>(
+            () => FetchAndCache(id), LazyThreadSafetyMode.ExecutionAndPublication));
+
+        return AwaitRequest(steamId, request);
+    }
+
+    private async Task<CachedData> AwaitRequest(ulong steamId, Lazy<Task<CachedData>> request)
+    {
+        try
+        {
+            return await request.Value;
+        }
+        finally
+        {
+            _fetching.TryRemove(steamId, out _);
+        }
+    }
+
+    private async Task<CachedData> FetchAndCache(ulong steamId)
+    {
         CachedData data;
         try
         {
@@ -386,6 +404,19 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
 
         _cache[steamId] = data;
         return data;
+    }
+
+    private bool CanUseEloCommand(ulong steamId)
+    {
+        var now = Environment.TickCount64;
+        if (_eloCommandTimes.TryGetValue(steamId, out var lastUsed)
+            && now - lastUsed < EloCommandCooldownMs)
+        {
+            return false;
+        }
+
+        _eloCommandTimes[steamId] = now;
+        return true;
     }
 
     private CS2FaceitLevelsLang LoadLanguage(string language)

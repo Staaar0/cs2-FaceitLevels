@@ -2,7 +2,7 @@
 
 CS2 plugin that shows a player's real FACEIT level in the CS2 scoreboard.
 
-From 1 to challanger badge
+From 1 to Challenger badge
 
 The plugin does this:
 

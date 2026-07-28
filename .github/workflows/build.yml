@@ -20,7 +20,7 @@ jobs:
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '8.0.x'
+          dotnet-version: '10.0.x'
 
       - name: Restore
         run: dotnet restore CS2FaceitLevels/CS2FaceitLevels.csproj
@@ -32,10 +32,10 @@ jobs:
         run: |
           mkdir -p package/addons/counterstrikesharp/plugins/CS2FaceitLevels
 
-          cp CS2FaceitLevels/bin/Release/net8.0/CS2FaceitLevels.dll package/addons/counterstrikesharp/plugins/CS2FaceitLevels/
+          cp CS2FaceitLevels/bin/Release/net10.0/CS2FaceitLevels.dll package/addons/counterstrikesharp/plugins/CS2FaceitLevels/
 
-          if [ -d CS2FaceitLevels/bin/Release/net8.0/lang ]; then
-            cp -r CS2FaceitLevels/bin/Release/net8.0/lang package/addons/counterstrikesharp/plugins/CS2FaceitLevels/
+          if [ -d CS2FaceitLevels/bin/Release/net10.0/lang ]; then
+            cp -r CS2FaceitLevels/bin/Release/net10.0/lang package/addons/counterstrikesharp/plugins/CS2FaceitLevels/
           fi
 
           cd package
