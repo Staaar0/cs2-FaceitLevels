@@ -55,6 +55,7 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
     private readonly ConcurrentDictionary<ulong, Lazy<Task<CachedData>>> _fetching = new();
     private readonly Dictionary<ulong, MedalRank_t> _applied = new();
     private readonly Dictionary<ulong, long> _eloCommandTimes = new();
+    private bool _reloadOnFirstConnect;
 
     private CS2FaceitLevelsLang _lang = new();
 
@@ -80,7 +81,9 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
 
         RegisterListener<Listeners.OnTick>(EnforcePins);
         RegisterListener<Listeners.OnServerPostEntityThink>(EnforcePins);
-        RegisterListener<Listeners.OnMapStart>(OnMapStart);
+
+        _reloadOnFirstConnect = !hotReload;
+
         AddTimer(60f, CleanupExpiredCache, TimerFlags.REPEAT);
 
         if (Config.EnableEloCommands)
@@ -93,7 +96,17 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
             AddTimer(2f, () => RefreshAll(force: true));
     }
 
-    private HookResult OnPlayerConnectFull(EventPlayerConnectFull e, GameEventInfo info) => Refresh(e.Userid, 2f);
+    private HookResult OnPlayerConnectFull(EventPlayerConnectFull e, GameEventInfo info)
+    {
+        if (_reloadOnFirstConnect && IsValid(e.Userid))
+        {
+            _reloadOnFirstConnect = false;
+            Server.ExecuteCommand("css_plugins reload CS2FaceitLevels");
+        }
+
+        return Refresh(e.Userid, 2f);
+    }
+
     private HookResult OnPlayerSpawn(EventPlayerSpawn e, GameEventInfo info) => Refresh(e.Userid, 0.2f);
     private HookResult OnPlayerTeam(EventPlayerTeam e, GameEventInfo info) => Refresh(e.Userid, 0.5f);
 
@@ -102,9 +115,6 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
         AddTimer(1f, () => RefreshAll(force: false), TimerFlags.STOP_ON_MAPCHANGE);
         return HookResult.Continue;
     }
-
-    private static void OnMapStart(string mapName) =>
-        Server.ExecuteCommand("css_plugins reload CS2FaceitLevels");
 
     private void EnforcePins()
     {
