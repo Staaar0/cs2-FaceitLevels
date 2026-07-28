@@ -55,6 +55,7 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
     private readonly ConcurrentDictionary<ulong, Lazy<Task<CachedData>>> _fetching = new();
     private readonly Dictionary<ulong, MedalRank_t> _applied = new();
     private readonly Dictionary<ulong, long> _eloCommandTimes = new();
+    private bool _pinListenersRegistered;
 
     private CS2FaceitLevelsLang _lang = new();
 
@@ -78,8 +79,6 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
         RegisterEventHandler<EventRoundStart>(OnRoundStart);
         RegisterEventHandler<EventPlayerDisconnect>(OnPlayerDisconnect);
 
-        RegisterListener<Listeners.OnTick>(EnforcePins);
-        RegisterListener<Listeners.OnServerPostEntityThink>(EnforcePins);
         AddTimer(60f, CleanupExpiredCache, TimerFlags.REPEAT);
 
         if (Config.EnableEloCommands)
@@ -88,8 +87,22 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
             AddCommand("css_elos", "Show every player's FACEIT elo.", OnElosCommand);
         }
 
-        if (hotReload)
-            AddTimer(2f, () => RefreshAll(force: true));
+    }
+
+    public override void OnAllPluginsLoaded(bool hotReload)
+    {
+        Server.NextFrame(() =>
+        {
+            if (_pinListenersRegistered)
+                return;
+
+            RegisterListener<Listeners.OnTick>(EnforcePins);
+            RegisterListener<Listeners.OnServerPostEntityThink>(EnforcePins);
+            _pinListenersRegistered = true;
+
+            if (hotReload)
+                AddTimer(2f, () => RefreshAll(force: true));
+        });
     }
 
     private HookResult OnPlayerConnectFull(EventPlayerConnectFull e, GameEventInfo info) => Refresh(e.Userid, 2f);
