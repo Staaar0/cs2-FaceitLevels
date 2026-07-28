@@ -56,6 +56,7 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
     private readonly Dictionary<ulong, MedalRank_t> _applied = new();
     private readonly Dictionary<ulong, long> _eloCommandTimes = new();
     private bool _pinListenersRegistered;
+    private bool _startupRebindScheduled;
 
     private CS2FaceitLevelsLang _lang = new();
 
@@ -78,7 +79,9 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
         RegisterEventHandler<EventPlayerTeam>(OnPlayerTeam);
         RegisterEventHandler<EventRoundStart>(OnRoundStart);
         RegisterEventHandler<EventPlayerDisconnect>(OnPlayerDisconnect);
+        RegisterListener<Listeners.OnMapStart>(OnMapStart);
 
+        RebindPinListeners();
         AddTimer(60f, CleanupExpiredCache, TimerFlags.REPEAT);
 
         if (Config.EnableEloCommands)
@@ -91,21 +94,38 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
 
     public override void OnAllPluginsLoaded(bool hotReload)
     {
-        Server.NextFrame(() =>
+        RebindPinListeners();
+        AddTimer(2f, () =>
         {
-            if (_pinListenersRegistered)
-                return;
-
-            RegisterListener<Listeners.OnTick>(EnforcePins);
-            RegisterListener<Listeners.OnServerPostEntityThink>(EnforcePins);
-            _pinListenersRegistered = true;
-
-            if (hotReload)
-                AddTimer(2f, () => RefreshAll(force: true));
+            RebindPinListeners();
+            RefreshAll(force: true);
         });
     }
 
-    private HookResult OnPlayerConnectFull(EventPlayerConnectFull e, GameEventInfo info) => Refresh(e.Userid, 2f);
+    private void OnMapStart(string mapName)
+    {
+        _startupRebindScheduled = true;
+        AddTimer(1f, () =>
+        {
+            RebindPinListeners();
+            RefreshAll(force: true);
+        }, TimerFlags.STOP_ON_MAPCHANGE);
+    }
+
+    private HookResult OnPlayerConnectFull(EventPlayerConnectFull e, GameEventInfo info)
+    {
+        if (!_startupRebindScheduled)
+        {
+            _startupRebindScheduled = true;
+            AddTimer(1f, () =>
+            {
+                RebindPinListeners();
+                RefreshAll(force: true);
+            }, TimerFlags.STOP_ON_MAPCHANGE);
+        }
+
+        return Refresh(e.Userid, 2f);
+    }
     private HookResult OnPlayerSpawn(EventPlayerSpawn e, GameEventInfo info) => Refresh(e.Userid, 0.2f);
     private HookResult OnPlayerTeam(EventPlayerTeam e, GameEventInfo info) => Refresh(e.Userid, 0.5f);
 
@@ -113,6 +133,20 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
     {
         AddTimer(1f, () => RefreshAll(force: false), TimerFlags.STOP_ON_MAPCHANGE);
         return HookResult.Continue;
+    }
+
+    private void RebindPinListeners()
+    {
+        if (_pinListenersRegistered)
+        {
+            RemoveListener<Listeners.OnTick>(EnforcePins);
+            RemoveListener<Listeners.OnServerPostEntityThink>(EnforcePins);
+        }
+
+        RegisterListener<Listeners.OnTick>(EnforcePins);
+        RegisterListener<Listeners.OnServerPostEntityThink>(EnforcePins);
+        _pinListenersRegistered = true;
+        EnforcePins();
     }
 
     private void EnforcePins()
