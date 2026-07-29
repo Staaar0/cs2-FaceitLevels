@@ -80,7 +80,7 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
         RegisterEventHandler<EventPlayerDisconnect>(OnPlayerDisconnect);
 
         RegisterListener<Listeners.OnTick>(EnforcePins);
-        RegisterListener<Listeners.OnServerPostEntityThink>(EnforcePins);
+        RegisterListener<Listeners.OnMapStart>(OnMapStart);
 
         _reloadOnFirstConnect = !hotReload;
 
@@ -92,8 +92,12 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
             AddCommand("css_elos", "Show every player's FACEIT elo.", OnElosCommand);
         }
 
-        if (hotReload)
-            AddTimer(2f, () => RefreshAll(force: true));
+        AddTimer(2f, () => RefreshAll(force: hotReload), TimerFlags.STOP_ON_MAPCHANGE);
+    }
+
+    private void OnMapStart(string mapName)
+    {
+        AddTimer(2f, () => RefreshAll(force: false), TimerFlags.STOP_ON_MAPCHANGE);
     }
 
     private HookResult OnPlayerConnectFull(EventPlayerConnectFull e, GameEventInfo info)
@@ -101,7 +105,7 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
         if (_reloadOnFirstConnect && IsValid(e.Userid))
         {
             _reloadOnFirstConnect = false;
-            Server.ExecuteCommand("css_plugins reload CS2FaceitLevels");
+            Server.NextFrame(() => Server.ExecuteCommand("css_plugins reload CS2FaceitLevels"));
         }
 
         return Refresh(e.Userid, 2f);
@@ -118,9 +122,10 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
 
     private void EnforcePins()
     {
-        foreach (var player in GetPlayers())
+        for (var slot = 0; slot < Server.MaxPlayers; slot++)
         {
-            if (player.InventoryServices is not { } inventory)
+            var player = Utilities.GetPlayerFromSlot(slot);
+            if (!IsValid(player) || player.InventoryServices is not { } inventory || inventory.Rank.Length <= 5)
                 continue;
 
             if (_applied.TryGetValue(player.SteamID, out var rank))
@@ -154,7 +159,8 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
         if (IsValid(player))
         {
             var slot = player.Slot;
-            AddTimer(delay, () => RefreshSlot(slot, force: false), TimerFlags.STOP_ON_MAPCHANGE);
+            var steamId = player.SteamID;
+            AddTimer(delay, () => RefreshSlot(slot, steamId, force: false), TimerFlags.STOP_ON_MAPCHANGE);
         }
         return HookResult.Continue;
     }
@@ -162,16 +168,16 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
     private void RefreshAll(bool force)
     {
         foreach (var player in GetPlayers())
-            RefreshSlot(player.Slot, force);
+            RefreshSlot(player.Slot, player.SteamID, force);
     }
 
-    private void RefreshSlot(int slot, bool force)
+    private void RefreshSlot(int slot, ulong expectedSteamId, bool force)
     {
         var player = Utilities.GetPlayerFromSlot(slot);
-        if (!IsValid(player))
+        if (!IsValid(player) || player.SteamID != expectedSteamId)
             return;
 
-        var steamId = player.SteamID;
+        var steamId = expectedSteamId;
 
         if (!force && _cache.TryGetValue(steamId, out var cached) && cached.ExpiresAt > DateTime.UtcNow)
         {
@@ -203,7 +209,7 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
 
     private void Apply(CCSPlayerController player, CachedData data)
     {
-        if (player.InventoryServices == null)
+        if (player.InventoryServices == null || player.InventoryServices.Rank.Length <= 5)
             return;
 
         MedalRank_t rank;
@@ -215,8 +221,11 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
             return;
 
         _applied[player.SteamID] = rank;
-        player.InventoryServices.Rank[5] = rank;
-        Utilities.SetStateChanged(player, "CCSPlayerController", "m_pInventoryServices");
+        if (player.InventoryServices.Rank[5] != rank)
+        {
+            player.InventoryServices.Rank[5] = rank;
+            Utilities.SetStateChanged(player, "CCSPlayerController", "m_pInventoryServices");
+        }
 
         if (Config.Debug)
             Logger.LogInformation("[CS2FaceitLevels] Updated scoreboard pin for {Name} (level {Level}).", player.PlayerName, data.Level);
@@ -329,6 +338,7 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
         }
 
         var callerSlot = caller.Slot;
+        var callerSteamId = caller.SteamID;
         var targetName = matches[0].PlayerName;
         var targetSteamId = matches[0].SteamID;
 
@@ -338,7 +348,7 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
             Server.NextFrame(() =>
             {
                 var c = Utilities.GetPlayerFromSlot(callerSlot);
-                if (IsValid(c))
+                if (IsValid(c) && c.SteamID == callerSteamId)
                     c.PrintToChat(EloLine(_lang.SingleEloChatFormat, targetName, targetSteamId, data));
             });
         });
@@ -356,6 +366,7 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
             return;
 
         var callerSlot = caller.Slot;
+        var callerSteamId = caller.SteamID;
         var targets = GetPlayers()
             .OrderBy(p => p.TeamNum)
             .ThenBy(p => p.PlayerName)
@@ -371,7 +382,7 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
             Server.NextFrame(() =>
             {
                 var c = Utilities.GetPlayerFromSlot(callerSlot);
-                if (!IsValid(c))
+                if (!IsValid(c) || c.SteamID != callerSteamId)
                     return;
 
                 foreach (var line in lines)
