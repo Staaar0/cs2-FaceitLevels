@@ -61,6 +61,7 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
     private readonly ConcurrentDictionary<ulong, CachedData> _cache = new();
     private readonly ConcurrentDictionary<ulong, Lazy<Task<CachedData>>> _fetching = new();
     private readonly Dictionary<ulong, MedalRank_t> _applied = new();
+    private readonly Dictionary<int, ulong> _connectedPlayers = new();
     private readonly Dictionary<ulong, long> _eloCommandTimes = new();
     private bool _reloadOnFirstConnect;
 
@@ -91,6 +92,8 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
         RegisterListener<Listeners.OnTick>(EnforcePins);
         RegisterListener<Listeners.OnMapStart>(OnMapStart);
 
+        TrackConnectedPlayers();
+
         _reloadOnFirstConnect = !hotReload;
 
         AddTimer(60f, CleanupExpiredCache, TimerFlags.REPEAT);
@@ -111,6 +114,8 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
 
     private HookResult OnPlayerConnectFull(EventPlayerConnectFull e, GameEventInfo info)
     {
+        TrackPlayer(e.Userid);
+
         if (_reloadOnFirstConnect && IsValid(e.Userid))
         {
             _reloadOnFirstConnect = false;
@@ -120,8 +125,17 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
         return Refresh(e.Userid, 2f);
     }
 
-    private HookResult OnPlayerSpawn(EventPlayerSpawn e, GameEventInfo info) => Refresh(e.Userid, 0.2f);
-    private HookResult OnPlayerTeam(EventPlayerTeam e, GameEventInfo info) => Refresh(e.Userid, 0.5f);
+    private HookResult OnPlayerSpawn(EventPlayerSpawn e, GameEventInfo info)
+    {
+        TrackPlayer(e.Userid);
+        return Refresh(e.Userid, 0.2f);
+    }
+
+    private HookResult OnPlayerTeam(EventPlayerTeam e, GameEventInfo info)
+    {
+        TrackPlayer(e.Userid);
+        return Refresh(e.Userid, 0.5f);
+    }
 
     private HookResult OnRoundStart(EventRoundStart e, GameEventInfo info)
     {
@@ -131,13 +145,14 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
 
     private void EnforcePins()
     {
-        for (var slot = 0; slot < Server.MaxPlayers; slot++)
+        foreach (var (slot, steamId) in _connectedPlayers)
         {
             var player = Utilities.GetPlayerFromSlot(slot);
-            if (!IsValid(player) || player.InventoryServices is not { } inventory || inventory.Rank.Length <= 5)
+            if (!IsValid(player) || player.SteamID != steamId ||
+                player.InventoryServices is not { } inventory || inventory.Rank.Length <= 5)
                 continue;
 
-            if (_applied.TryGetValue(player.SteamID, out var rank))
+            if (_applied.TryGetValue(steamId, out var rank))
             {
                 if (inventory.Rank[5] != rank)
                 {
@@ -153,12 +168,30 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
         }
     }
 
+    private void TrackConnectedPlayers()
+    {
+        _connectedPlayers.Clear();
+        foreach (var player in GetPlayers())
+            _connectedPlayers[player.Slot] = player.SteamID;
+    }
+
+    private void TrackPlayer(CCSPlayerController? player)
+    {
+        if (IsValid(player))
+            _connectedPlayers[player.Slot] = player.SteamID;
+    }
+
     private HookResult OnPlayerDisconnect(EventPlayerDisconnect e, GameEventInfo info)
     {
-        if (e.Userid is { } player && player.SteamID != 0)
+        if (e.Userid is { } player)
         {
-            _applied.Remove(player.SteamID);
-            _eloCommandTimes.Remove(player.SteamID);
+            _connectedPlayers.Remove(player.Slot);
+
+            if (player.SteamID != 0)
+            {
+                _applied.Remove(player.SteamID);
+                _eloCommandTimes.Remove(player.SteamID);
+            }
         }
         return HookResult.Continue;
     }
