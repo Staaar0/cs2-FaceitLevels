@@ -61,6 +61,7 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
     private readonly ConcurrentDictionary<ulong, CachedData> _cache = new();
     private readonly ConcurrentDictionary<ulong, Lazy<Task<CachedData>>> _fetching = new();
     private readonly Dictionary<ulong, MedalRank_t> _applied = new();
+    private readonly ConcurrentDictionary<int, ulong> _connectedPlayers = new();
     private readonly Dictionary<ulong, long> _eloCommandTimes = new();
     private bool _reloadOnFirstConnect;
 
@@ -89,7 +90,12 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
         RegisterEventHandler<EventPlayerDisconnect>(OnPlayerDisconnect);
 
         RegisterListener<Listeners.OnTick>(EnforcePins);
+        RegisterListener<Listeners.OnClientPutInServer>(OnClientPutInServer);
+        RegisterListener<Listeners.OnClientDisconnect>(OnClientDisconnect);
         RegisterListener<Listeners.OnMapStart>(OnMapStart);
+
+        if (hotReload)
+            TrackConnectedPlayers();
 
         _reloadOnFirstConnect = !hotReload;
 
@@ -131,13 +137,16 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
 
     private void EnforcePins()
     {
-        for (var slot = 0; slot < Server.MaxPlayers; slot++)
+        foreach (var entry in _connectedPlayers)
         {
+            var slot = entry.Key;
+            var steamId = entry.Value;
             var player = Utilities.GetPlayerFromSlot(slot);
-            if (!IsValid(player) || player.InventoryServices is not { } inventory || inventory.Rank.Length <= 5)
+            if (!IsConnectedPlayer(player) || player.SteamID != steamId ||
+                player.InventoryServices is not { } inventory || inventory.Rank.Length <= 5)
                 continue;
 
-            if (_applied.TryGetValue(player.SteamID, out var rank))
+            if (_applied.TryGetValue(steamId, out var rank))
             {
                 if (inventory.Rank[5] != rank)
                 {
@@ -151,6 +160,28 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
                 Utilities.SetStateChanged(player, "CCSPlayerController", "m_pInventoryServices");
             }
         }
+    }
+
+    private void TrackConnectedPlayers()
+    {
+        _connectedPlayers.Clear();
+        foreach (var player in GetPlayers())
+            _connectedPlayers[player.Slot] = player.SteamID;
+    }
+
+    private void OnClientPutInServer(int playerSlot)
+    {
+        Server.NextFrame(() =>
+        {
+            var player = Utilities.GetPlayerFromSlot(playerSlot);
+            if (IsConnectedPlayer(player))
+                _connectedPlayers[playerSlot] = player.SteamID;
+        });
+    }
+
+    private void OnClientDisconnect(int playerSlot)
+    {
+        _connectedPlayers.TryRemove(playerSlot, out _);
     }
 
     private HookResult OnPlayerDisconnect(EventPlayerDisconnect e, GameEventInfo info)
@@ -693,6 +724,9 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
     }
 
     private static IEnumerable<CCSPlayerController> GetPlayers() => Utilities.GetPlayers().Where(IsValid);
+
+    private static bool IsConnectedPlayer([NotNullWhen(true)] CCSPlayerController? player) =>
+        IsValid(player) && player.Connected == PlayerConnectedState.Connected;
 
     private static bool IsValid([NotNullWhen(true)] CCSPlayerController? player) =>
         player is { IsValid: true, IsBot: false, SteamID: not 0 };
