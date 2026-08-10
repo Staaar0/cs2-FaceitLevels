@@ -42,6 +42,8 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
     };
 
     private static readonly HttpClient Http = new();
+    private static readonly SemaphoreSlim HttpSlots = new(4, 4);
+    private static readonly SemaphoreSlim CacheFileLock = new(1, 1);
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         PropertyNameCaseInsensitive = true,
@@ -50,6 +52,11 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
     };
 
     private const long EloCommandCooldownMs = 200;
+    private const int MaxRequestAttempts = 3;
+
+    private long _requestBlockedUntilTicks;
+
+    private string CacheFilePath => Path.Combine(ModuleDirectory, "cache.json");
 
     private readonly ConcurrentDictionary<ulong, CachedData> _cache = new();
     private readonly ConcurrentDictionary<ulong, Lazy<Task<CachedData>>> _fetching = new();
@@ -73,6 +80,8 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
 
     public override void Load(bool hotReload)
     {
+        LoadPersistentCache();
+
         RegisterEventHandler<EventPlayerConnectFull>(OnPlayerConnectFull);
         RegisterEventHandler<EventPlayerSpawn>(OnPlayerSpawn);
         RegisterEventHandler<EventPlayerTeam>(OnPlayerTeam);
@@ -200,16 +209,96 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
     private void CleanupExpiredCache()
     {
         var now = DateTime.UtcNow;
+        var changed = false;
+
         foreach (var entry in _cache)
         {
-            if (entry.Value.ExpiresAt <= now)
-                _cache.TryRemove(entry.Key, out _);
+            if (entry.Value.ExpiresAt <= now && _cache.TryRemove(entry.Key, out _))
+                changed = true;
+        }
+
+        if (changed)
+            _ = SavePersistentCache();
+    }
+
+    private void LoadPersistentCache()
+    {
+        var path = CacheFilePath;
+        if (!File.Exists(path))
+            return;
+
+        try
+        {
+            var entries = JsonSerializer.Deserialize<List<PersistentCacheEntry>>(File.ReadAllText(path), JsonOptions);
+            if (entries == null)
+                return;
+
+            var now = DateTime.UtcNow;
+            var changed = false;
+
+            foreach (var entry in entries)
+            {
+                if (entry.SteamId == 0 || entry.Level < 0 || entry.ExpiresAt <= now)
+                {
+                    changed = true;
+                    continue;
+                }
+
+                _cache[entry.SteamId] = new CachedData(entry.Level, entry.Elo, entry.ExpiresAt);
+            }
+
+            if (changed)
+                _ = SavePersistentCache();
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "[CS2FaceitLevels] Failed to read cache file {Path}.", path);
+        }
+    }
+
+    private async Task SavePersistentCache()
+    {
+        await CacheFileLock.WaitAsync();
+        var path = CacheFilePath;
+        var tempPath = path + ".tmp";
+
+        try
+        {
+            var now = DateTime.UtcNow;
+            var entries = _cache
+                .Where(entry => entry.Value.Level >= 0 && entry.Value.ExpiresAt > now)
+                .Select(entry => new PersistentCacheEntry(
+                    entry.Key, entry.Value.Level, entry.Value.Elo, entry.Value.ExpiresAt))
+                .OrderBy(entry => entry.SteamId)
+                .ToList();
+
+            var json = JsonSerializer.Serialize(entries, JsonOptions);
+            await File.WriteAllTextAsync(tempPath, json);
+            File.Move(tempPath, path, true);
+        }
+        catch (Exception ex)
+        {
+            if (Config.Debug)
+                Logger.LogWarning(ex, "[CS2FaceitLevels] Failed to write cache file {Path}.", path);
+
+            try
+            {
+                if (File.Exists(tempPath))
+                    File.Delete(tempPath);
+            }
+            catch
+            {
+            }
+        }
+        finally
+        {
+            CacheFileLock.Release();
         }
     }
 
     private void Apply(CCSPlayerController player, CachedData data)
     {
-        if (player.InventoryServices == null || player.InventoryServices.Rank.Length <= 5)
+        if (data.Level < 0 || player.InventoryServices == null || player.InventoryServices.Rank.Length <= 5)
             return;
 
         MedalRank_t rank;
@@ -260,46 +349,116 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
 
     private async Task<bool> IsChallenger(string playerId, string region)
     {
-        try
-        {
-            var url = $"https://open.faceit.com/data/v4/rankings/games/cs2/regions/{Uri.EscapeDataString(region)}/players/{Uri.EscapeDataString(playerId)}";
-            var ranking = await GetJson<FaceitRanking>(url);
-            var position = ranking?.Position ?? ranking?.Items?.FirstOrDefault()?.Position ?? 0;
-            return position is > 0 and <= 1000;
-        }
-        catch (Exception ex)
-        {
-            if (Config.Debug)
-                Logger.LogWarning(ex, "[CS2FaceitLevels] Challenger check failed for {PlayerId}.", playerId);
-
-            return false;
-        }
+        var url = $"https://open.faceit.com/data/v4/rankings/games/cs2/regions/{Uri.EscapeDataString(region)}/players/{Uri.EscapeDataString(playerId)}";
+        var ranking = await GetJson<FaceitRanking>(url);
+        var position = ranking?.Position ?? ranking?.Items?.FirstOrDefault()?.Position ?? 0;
+        return position is > 0 and <= 1000;
     }
 
     private async Task<T?> GetJson<T>(string url) where T : class
     {
-        using var request = new HttpRequestMessage(HttpMethod.Get, url);
-        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", Config.FaceitApiKey);
+        ThrowIfRequestBackedOff();
 
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(Config.RequestTimeoutSeconds));
-        using var response = await Http.SendAsync(request, cts.Token);
-
-        if (response.StatusCode == HttpStatusCode.NotFound)
-            return null;
-
-        if (!response.IsSuccessStatusCode)
+        for (var attempt = 1; attempt <= MaxRequestAttempts; attempt++)
         {
-            if (Config.Debug)
-                Logger.LogWarning("[CS2FaceitLevels] FACEIT API returned status {Status}.", (int)response.StatusCode);
+            try
+            {
+                await HttpSlots.WaitAsync();
+                try
+                {
+                    ThrowIfRequestBackedOff();
 
-            return null;
+                    using var request = new HttpRequestMessage(HttpMethod.Get, url);
+                    request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", Config.FaceitApiKey);
+
+                    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(Config.RequestTimeoutSeconds));
+                    using var response = await Http.SendAsync(request, cts.Token);
+
+                    if (response.StatusCode == HttpStatusCode.NotFound)
+                        return null;
+
+                    if (response.StatusCode == HttpStatusCode.TooManyRequests)
+                    {
+                        var retryAfter = response.Headers.RetryAfter?.Delta;
+                        if (retryAfter == null && response.Headers.RetryAfter?.Date is { } retryDate)
+                            retryAfter = retryDate - DateTimeOffset.UtcNow;
+
+                        var delay = retryAfter ?? TimeSpan.FromMinutes(5);
+                        SetRequestBackoff(delay < TimeSpan.FromSeconds(30) ? TimeSpan.FromSeconds(30) : delay);
+                        throw new FaceitApiException("FACEIT API rate limit reached.");
+                    }
+
+                    if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
+                    {
+                        SetRequestBackoff(TimeSpan.FromMinutes(10));
+                        throw new FaceitApiException($"FACEIT API authorization failed with status {(int)response.StatusCode}.");
+                    }
+
+                    if ((int)response.StatusCode >= 500)
+                    {
+                        if (attempt == MaxRequestAttempts)
+                        {
+                            SetRequestBackoff(TimeSpan.FromSeconds(60));
+                            throw new FaceitApiException($"FACEIT API returned status {(int)response.StatusCode} after retries.");
+                        }
+                    }
+                    else
+                    {
+                        if (!response.IsSuccessStatusCode)
+                            throw new FaceitApiException($"FACEIT API returned status {(int)response.StatusCode}.");
+
+                        var body = await response.Content.ReadAsStringAsync(cts.Token);
+                        return JsonSerializer.Deserialize<T>(body, JsonOptions);
+                    }
+                }
+                finally
+                {
+                    HttpSlots.Release();
+                }
+            }
+            catch (FaceitApiException)
+            {
+                throw;
+            }
+            catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+            {
+                if (attempt == MaxRequestAttempts)
+                {
+                    SetRequestBackoff(TimeSpan.FromSeconds(60));
+                    throw new FaceitApiException("FACEIT API request failed after retries.", ex);
+                }
+            }
+
+            await Task.Delay(TimeSpan.FromSeconds(attempt));
         }
 
-        var body = await response.Content.ReadAsStringAsync(cts.Token);
-        return JsonSerializer.Deserialize<T>(body, JsonOptions);
+        throw new FaceitApiException("FACEIT API request failed.");
+    }
+
+    private void ThrowIfRequestBackedOff()
+    {
+        var blockedUntil = new DateTime(Volatile.Read(ref _requestBlockedUntilTicks), DateTimeKind.Utc);
+        if (blockedUntil > DateTime.UtcNow)
+            throw new FaceitApiException("FACEIT API requests are temporarily backed off.");
+    }
+
+    private void SetRequestBackoff(TimeSpan duration)
+    {
+        var until = DateTime.UtcNow.Add(duration).Ticks;
+        var current = Volatile.Read(ref _requestBlockedUntilTicks);
+
+        while (until > current)
+        {
+            var observed = Interlocked.CompareExchange(ref _requestBlockedUntilTicks, until, current);
+            if (observed == current)
+                break;
+
+            current = observed;
+        }
     }
 
     private CachedData NoFaceit() => new(0, null, DateTime.UtcNow.AddMinutes(Config.CacheMinutes));
+    private static CachedData RequestFailed() => new(-1, null, DateTime.MinValue);
 
     private void OnEloCommand(CCSPlayerController? caller, CommandInfo command)
     {
@@ -416,19 +575,23 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
 
     private async Task<CachedData> FetchAndCache(ulong steamId)
     {
-        CachedData data;
         try
         {
-            data = await FetchFromFaceit(steamId);
+            var data = await FetchFromFaceit(steamId);
+            _cache[steamId] = data;
+            _ = SavePersistentCache();
+            return data;
         }
-        catch (Exception ex)
+        catch (FaceitApiException ex)
         {
-            Logger.LogWarning(ex, "[CS2FaceitLevels] FACEIT lookup failed for {SteamId}.", steamId);
-            data = NoFaceit();
-        }
+            if (Config.Debug)
+                Logger.LogWarning(ex, "[CS2FaceitLevels] FACEIT lookup failed for {SteamId}.", steamId);
 
-        _cache[steamId] = data;
-        return data;
+            if (_cache.TryGetValue(steamId, out var cached))
+                return cached;
+
+            return RequestFailed();
+        }
     }
 
     private bool CanUseEloCommand(ulong steamId)
@@ -534,9 +697,17 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
     private static bool IsValid([NotNullWhen(true)] CCSPlayerController? player) =>
         player is { IsValid: true, IsBot: false, SteamID: not 0 };
 
+    private sealed record PersistentCacheEntry(ulong SteamId, int Level, int? Elo, DateTime ExpiresAt);
+
     private sealed record CachedData(int Level, int? Elo, DateTime ExpiresAt)
     {
-        public int SkillLevel => Level == 0 ? 0 : Math.Min(Level, 10);
+        public int SkillLevel => Level <= 0 ? 0 : Math.Min(Level, 10);
+    }
+
+    private sealed class FaceitApiException : Exception
+    {
+        public FaceitApiException(string message) : base(message) { }
+        public FaceitApiException(string message, Exception innerException) : base(message, innerException) { }
     }
 
     private sealed class FaceitPlayer
