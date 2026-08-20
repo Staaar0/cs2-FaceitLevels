@@ -49,4 +49,21 @@ public sealed class CS2FaceitLevelsLang
 
     [JsonPropertyName("player_only_message")]
     public string PlayerOnlyMessage { get; set; } = "{PREFIX} This command is player-only.";
+
+    public CS2FaceitLevelsLang Normalized()
+    {
+        var defaults = new CS2FaceitLevelsLang();
+
+        ChatPrefix = Or(ChatPrefix, defaults.ChatPrefix);
+        SingleEloChatFormat = Or(SingleEloChatFormat, defaults.SingleEloChatFormat);
+        AllElosChatFormat = Or(AllElosChatFormat, defaults.AllElosChatFormat);
+        MissingPlayerNameMessage = Or(MissingPlayerNameMessage, defaults.MissingPlayerNameMessage);
+        NoPlayerFoundMessage = Or(NoPlayerFoundMessage, defaults.NoPlayerFoundMessage);
+        MultiplePlayersFoundMessage = Or(MultiplePlayersFoundMessage, defaults.MultiplePlayersFoundMessage);
+        PlayerOnlyMessage = Or(PlayerOnlyMessage, defaults.PlayerOnlyMessage);
+
+        return this;
+    }
+
+    private static string Or(string? value, string fallback) => value ?? fallback;
 }

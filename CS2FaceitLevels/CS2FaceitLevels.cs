@@ -6,6 +6,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
+using CounterStrikeSharp.API.Core.Attributes;
 using CounterStrikeSharp.API.Modules.Commands;
 using CounterStrikeSharp.API.Modules.Entities.Constants;
 using CounterStrikeSharp.API.Modules.Timers;
@@ -14,14 +15,17 @@ using Microsoft.Extensions.Logging;
 
 namespace CS2FaceitLevels;
 
+[MinimumApiVersion(371)]
 public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsConfig>
 {
     public override string ModuleName => "CS2FaceitLevels";
     public override string ModuleAuthor => "✪ Stαr";
-    public override string ModuleVersion => "1.0.7";
+    public override string ModuleVersion => "1.0.8";
     public override string ModuleDescription => "Shows real FACEIT levels in the CS2 scoreboard.";
 
     private const string DefaultApiKey = "PUT_YOUR_FACEIT_API_KEY_HERE";
+
+    private const int PinRankIndex = 5;
 
     private static readonly Dictionary<int, int> LevelPins = new()
     {
@@ -41,7 +45,13 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
         ["magenta"] = ChatColors.Magenta, ["bluegrey"] = ChatColors.BlueGrey,
     };
 
-    private static readonly HttpClient Http = new();
+    private const int MaxResponseBytes = 1024 * 1024;
+    private const int MaxCacheEntries = 10_000;
+    private const long MaxCacheFileBytes = 8 * 1024 * 1024;
+    private const long MaxLanguageFileBytes = 128 * 1024;
+    private const int MaxPendingRequests = 128;
+
+    private static readonly HttpClient Http = new() { MaxResponseContentBufferSize = MaxResponseBytes };
     private static readonly SemaphoreSlim HttpSlots = new(4, 4);
     private static readonly SemaphoreSlim CacheFileLock = new(1, 1);
     private static readonly JsonSerializerOptions JsonOptions = new()
@@ -51,8 +61,15 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
         AllowTrailingCommas = true,
     };
 
-    private const long EloCommandCooldownMs = 200;
+    private const long EloCommandCooldownMs = 10_000;
+    private const int MaxElosLines = 32;
     private const int MaxRequestAttempts = 3;
+    private const int MinTimeoutSeconds = 2;
+    private const int MaxTimeoutSeconds = 60;
+    private const int MinCacheMinutes = 1;
+    private const int MaxCacheMinutes = 1440;
+
+    private const int FailureCacheMinutes = 2;
 
     private long _requestBlockedUntilTicks;
 
@@ -63,7 +80,12 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
     private readonly Dictionary<ulong, MedalRank_t> _applied = new();
     private readonly ConcurrentDictionary<int, ulong> _connectedPlayers = new();
     private readonly Dictionary<ulong, long> _eloCommandTimes = new();
+    private readonly HashSet<ulong> _eloCommandsInFlight = new();
+    private readonly SemaphoreSlim _pendingRequestSlots = new(MaxPendingRequests, MaxPendingRequests);
     private bool _reloadOnFirstConnect;
+    private int _cacheDirty;
+
+    private readonly CancellationTokenSource _cts = new();
 
     private CS2FaceitLevelsLang _lang = new();
 
@@ -71,8 +93,8 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
 
     public void OnConfigParsed(CS2FaceitLevelsConfig config)
     {
-        if (config.CacheMinutes < 1) config.CacheMinutes = 1;
-        if (config.RequestTimeoutSeconds < 2) config.RequestTimeoutSeconds = 2;
+        config.CacheMinutes = Math.Clamp(config.CacheMinutes, MinCacheMinutes, MaxCacheMinutes);
+        config.RequestTimeoutSeconds = Math.Clamp(config.RequestTimeoutSeconds, MinTimeoutSeconds, MaxTimeoutSeconds);
         if (string.IsNullOrWhiteSpace(config.Language)) config.Language = "en";
 
         Config = config;
@@ -110,6 +132,14 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
         AddTimer(2f, () => RefreshAll(force: hotReload), TimerFlags.STOP_ON_MAPCHANGE);
     }
 
+    public override void Unload(bool hotReload)
+    {
+        _cts.Cancel();
+        FlushCacheIfDirty();
+    }
+
+    private bool Stopping => _cts.IsCancellationRequested;
+
     private void OnMapStart(string mapName)
     {
         AddTimer(2f, () => RefreshAll(force: false), TimerFlags.STOP_ON_MAPCHANGE);
@@ -120,7 +150,11 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
         if (_reloadOnFirstConnect && IsValid(e.Userid))
         {
             _reloadOnFirstConnect = false;
-            Server.NextFrame(() => Server.ExecuteCommand("css_plugins reload CS2FaceitLevels"));
+            Server.NextFrame(() =>
+            {
+                if (Stopping) return;
+                Server.ExecuteCommand("css_plugins reload CS2FaceitLevels");
+            });
         }
 
         return Refresh(e.Userid, 2f);
@@ -137,26 +171,31 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
 
     private void EnforcePins()
     {
+        if (Stopping || _connectedPlayers.IsEmpty)
+            return;
+
         foreach (var entry in _connectedPlayers)
         {
-            var slot = entry.Key;
-            var steamId = entry.Value;
-            var player = Utilities.GetPlayerFromSlot(slot);
-            if (!IsConnectedPlayer(player) || player.SteamID != steamId ||
-                player.InventoryServices is not { } inventory || inventory.Rank.Length <= 5)
+            var player = Utilities.GetPlayerFromSlot(entry.Key);
+            if (!IsConnectedPlayer(player) || player.SteamID != entry.Value ||
+                player.InventoryServices is not { } inventory)
                 continue;
 
-            if (_applied.TryGetValue(steamId, out var rank))
+            var ranks = inventory.Rank;
+            if (ranks.Length <= PinRankIndex)
+                continue;
+
+            if (_applied.TryGetValue(entry.Value, out var rank))
             {
-                if (inventory.Rank[5] != rank)
+                if (ranks[PinRankIndex] != rank)
                 {
-                    inventory.Rank[5] = rank;
+                    ranks[PinRankIndex] = rank;
                     Utilities.SetStateChanged(player, "CCSPlayerController", "m_pInventoryServices");
                 }
             }
-            else if (LevelPins.ContainsValue((int)inventory.Rank[5]))
+            else if (LevelPins.ContainsValue((int)ranks[PinRankIndex]))
             {
-                inventory.Rank[5] = MedalRank_t.MEDAL_RANK_NONE;
+                ranks[PinRankIndex] = MedalRank_t.MEDAL_RANK_NONE;
                 Utilities.SetStateChanged(player, "CCSPlayerController", "m_pInventoryServices");
             }
         }
@@ -173,6 +212,8 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
     {
         Server.NextFrame(() =>
         {
+            if (Stopping) return;
+
             var player = Utilities.GetPlayerFromSlot(playerSlot);
             if (IsConnectedPlayer(player))
                 _connectedPlayers[playerSlot] = player.SteamID;
@@ -181,17 +222,24 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
 
     private void OnClientDisconnect(int playerSlot)
     {
-        _connectedPlayers.TryRemove(playerSlot, out _);
+        if (_connectedPlayers.TryRemove(playerSlot, out var steamId))
+            ForgetPlayer(steamId);
     }
 
     private HookResult OnPlayerDisconnect(EventPlayerDisconnect e, GameEventInfo info)
     {
-        if (e.Userid is { } player && player.SteamID != 0)
-        {
-            _applied.Remove(player.SteamID);
-            _eloCommandTimes.Remove(player.SteamID);
-        }
+        var player = e.Userid;
+        if (IsValid(player))
+            ForgetPlayer(player.SteamID);
+
         return HookResult.Continue;
+    }
+
+    private void ForgetPlayer(ulong steamId)
+    {
+        _applied.Remove(steamId);
+        _eloCommandTimes.Remove(steamId);
+        _eloCommandsInFlight.Remove(steamId);
     }
 
     private HookResult Refresh(CCSPlayerController? player, float delay)
@@ -207,12 +255,16 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
 
     private void RefreshAll(bool force)
     {
+        if (Stopping) return;
+
         foreach (var player in GetPlayers())
             RefreshSlot(player.Slot, player.SteamID, force);
     }
 
     private void RefreshSlot(int slot, ulong expectedSteamId, bool force)
     {
+        if (Stopping) return;
+
         var player = Utilities.GetPlayerFromSlot(slot);
         if (!IsValid(player) || player.SteamID != expectedSteamId)
             return;
@@ -225,31 +277,68 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
             return;
         }
 
-        Task.Run(async () =>
+        _ = Task.Run(async () =>
         {
-            var data = await GetOrFetch(steamId, force);
-            Server.NextFrame(() =>
+            try
             {
-                var current = Utilities.GetPlayerFromSlot(slot);
-                if (IsValid(current) && current.SteamID == steamId)
-                    Apply(current, data);
-            });
+                var data = await GetOrFetch(steamId, force);
+                Server.NextFrame(() =>
+                {
+                    if (Stopping) return;
+
+                    var current = Utilities.GetPlayerFromSlot(slot);
+                    if (IsValid(current) && current.SteamID == steamId)
+                        Apply(current, data);
+                });
+            }
+            catch (Exception ex)
+            {
+                LogBackgroundFailure(ex, steamId);
+            }
         });
     }
 
     private void CleanupExpiredCache()
     {
         var now = DateTime.UtcNow;
-        var changed = false;
 
         foreach (var entry in _cache)
         {
-            if (entry.Value.ExpiresAt <= now && _cache.TryRemove(entry.Key, out _))
-                changed = true;
+            if (entry.Value.ExpiresAt <= now && _cache.TryRemove(entry.Key, out var removed) && removed.Level >= 0)
+                MarkCacheDirty();
         }
 
-        if (changed)
-            _ = SavePersistentCache();
+        FlushCacheIfDirty();
+    }
+
+    private void MarkCacheDirty() => Interlocked.Exchange(ref _cacheDirty, 1);
+
+    private void LimitCacheSize()
+    {
+        while (_cache.Count > MaxCacheEntries)
+        {
+            KeyValuePair<ulong, CachedData>? oldest = null;
+
+            foreach (var entry in _cache)
+            {
+                if (oldest == null || entry.Value.ExpiresAt < oldest.Value.Value.ExpiresAt)
+                    oldest = entry;
+            }
+
+            if (oldest == null || !_cache.TryRemove(oldest.Value))
+                return;
+
+            if (oldest.Value.Value.Level >= 0)
+                MarkCacheDirty();
+        }
+    }
+
+    private void FlushCacheIfDirty()
+    {
+        if (Interlocked.Exchange(ref _cacheDirty, 0) == 0)
+            return;
+
+        _ = Task.Run(SavePersistentCache);
     }
 
     private void LoadPersistentCache()
@@ -260,26 +349,33 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
 
         try
         {
+            var info = new FileInfo(path);
+            if (info.Length > MaxCacheFileBytes)
+            {
+                Logger.LogWarning("[CS2FaceitLevels] Cache file {Path} is unexpectedly large ({Bytes} bytes), ignoring it.",
+                    path, info.Length);
+                return;
+            }
+
             var entries = JsonSerializer.Deserialize<List<PersistentCacheEntry>>(File.ReadAllText(path), JsonOptions);
             if (entries == null)
                 return;
 
             var now = DateTime.UtcNow;
-            var changed = false;
 
-            foreach (var entry in entries)
+            var validEntries = entries
+                .Where(entry => entry.SteamId != 0 && entry.Level >= 0 && entry.ExpiresAt > now)
+                .OrderByDescending(entry => entry.ExpiresAt)
+                .Take(MaxCacheEntries)
+                .ToList();
+
+            foreach (var entry in validEntries)
             {
-                if (entry.SteamId == 0 || entry.Level < 0 || entry.ExpiresAt <= now)
-                {
-                    changed = true;
-                    continue;
-                }
-
                 _cache[entry.SteamId] = new CachedData(entry.Level, entry.Elo, entry.ExpiresAt);
             }
 
-            if (changed)
-                _ = SavePersistentCache();
+            if (validEntries.Count != entries.Count || _cache.Count != validEntries.Count)
+                MarkCacheDirty();
         }
         catch (Exception ex)
         {
@@ -289,15 +385,20 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
 
     private async Task SavePersistentCache()
     {
-        await CacheFileLock.WaitAsync();
         var path = CacheFilePath;
         var tempPath = path + ".tmp";
+        var acquired = false;
 
         try
         {
+            await CacheFileLock.WaitAsync();
+            acquired = true;
+
             var now = DateTime.UtcNow;
             var entries = _cache
                 .Where(entry => entry.Value.Level >= 0 && entry.Value.ExpiresAt > now)
+                .OrderByDescending(entry => entry.Value.ExpiresAt)
+                .Take(MaxCacheEntries)
                 .Select(entry => new PersistentCacheEntry(
                     entry.Key, entry.Value.Level, entry.Value.Elo, entry.Value.ExpiresAt))
                 .OrderBy(entry => entry.SteamId)
@@ -323,13 +424,18 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
         }
         finally
         {
-            CacheFileLock.Release();
+            if (acquired)
+                CacheFileLock.Release();
         }
     }
 
     private void Apply(CCSPlayerController player, CachedData data)
     {
-        if (data.Level < 0 || player.InventoryServices == null || player.InventoryServices.Rank.Length <= 5)
+        if (data.Level < 0 || player.InventoryServices is not { } inventory)
+            return;
+
+        var ranks = inventory.Rank;
+        if (ranks.Length <= PinRankIndex)
             return;
 
         MedalRank_t rank;
@@ -341,9 +447,9 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
             return;
 
         _applied[player.SteamID] = rank;
-        if (player.InventoryServices.Rank[5] != rank)
+        if (ranks[PinRankIndex] != rank)
         {
-            player.InventoryServices.Rank[5] = rank;
+            ranks[PinRankIndex] = rank;
             Utilities.SetStateChanged(player, "CCSPlayerController", "m_pInventoryServices");
         }
 
@@ -351,7 +457,7 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
             Logger.LogInformation("[CS2FaceitLevels] Updated scoreboard pin for {Name} (level {Level}).", player.PlayerName, data.Level);
     }
 
-    private async Task<CachedData> FetchFromFaceit(ulong steamId)
+    private async Task<CachedData> FetchFromFaceit(ulong steamId, CancellationToken token)
     {
         if (string.IsNullOrWhiteSpace(Config.FaceitApiKey) || Config.FaceitApiKey == DefaultApiKey)
         {
@@ -361,7 +467,8 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
             return NoFaceit();
         }
 
-        var player = await GetJson<FaceitPlayer>($"https://open.faceit.com/data/v4/players?game=cs2&game_player_id={steamId}");
+        var player = await GetJson<FaceitPlayer>(
+            $"https://open.faceit.com/data/v4/players?game=cs2&game_player_id={steamId}", token);
         var cs2 = player?.Games?.Cs2;
 
         if (cs2?.SkillLevel is not (>= 1 and <= 10))
@@ -370,23 +477,23 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
         var level = cs2.SkillLevel.Value;
 
         if (level == 10 && !string.IsNullOrEmpty(player!.PlayerId) && !string.IsNullOrEmpty(cs2.Region)
-            && await IsChallenger(player.PlayerId!, cs2.Region!))
+            && await IsChallenger(player.PlayerId!, cs2.Region!, token))
         {
             level = 11;
         }
 
-        return new CachedData(level, cs2.Elo, DateTime.UtcNow.AddMinutes(Config.CacheMinutes));
+        return new CachedData(level, cs2.Elo, DateTime.UtcNow.AddMinutes(CacheMinutes()));
     }
 
-    private async Task<bool> IsChallenger(string playerId, string region)
+    private async Task<bool> IsChallenger(string playerId, string region, CancellationToken token)
     {
         var url = $"https://open.faceit.com/data/v4/rankings/games/cs2/regions/{Uri.EscapeDataString(region)}/players/{Uri.EscapeDataString(playerId)}";
-        var ranking = await GetJson<FaceitRanking>(url);
+        var ranking = await GetJson<FaceitRanking>(url, token);
         var position = ranking?.Position ?? ranking?.Items?.FirstOrDefault()?.Position ?? 0;
         return position is > 0 and <= 1000;
     }
 
-    private async Task<T?> GetJson<T>(string url) where T : class
+    private async Task<T?> GetJson<T>(string url, CancellationToken token) where T : class
     {
         ThrowIfRequestBackedOff();
 
@@ -394,7 +501,7 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
         {
             try
             {
-                await HttpSlots.WaitAsync();
+                await HttpSlots.WaitAsync(token);
                 try
                 {
                     ThrowIfRequestBackedOff();
@@ -402,8 +509,10 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
                     using var request = new HttpRequestMessage(HttpMethod.Get, url);
                     request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", Config.FaceitApiKey);
 
-                    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(Config.RequestTimeoutSeconds));
-                    using var response = await Http.SendAsync(request, cts.Token);
+                    using var cts = CancellationTokenSource.CreateLinkedTokenSource(token);
+                    cts.CancelAfter(TimeSpan.FromSeconds(TimeoutSeconds()));
+
+                    using var response = await Http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cts.Token);
 
                     if (response.StatusCode == HttpStatusCode.NotFound)
                         return null;
@@ -438,8 +547,16 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
                         if (!response.IsSuccessStatusCode)
                             throw new FaceitApiException($"FACEIT API returned status {(int)response.StatusCode}.");
 
-                        var body = await response.Content.ReadAsStringAsync(cts.Token);
-                        return JsonSerializer.Deserialize<T>(body, JsonOptions);
+                        var body = await ReadBoundedAsync(response, cts.Token);
+
+                        try
+                        {
+                            return JsonSerializer.Deserialize<T>(body, JsonOptions);
+                        }
+                        catch (JsonException ex)
+                        {
+                            throw new FaceitApiException("FACEIT API returned malformed JSON.", ex);
+                        }
                     }
                 }
                 finally
@@ -451,7 +568,11 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
             {
                 throw;
             }
-            catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+            catch (OperationCanceledException) when (token.IsCancellationRequested)
+            {
+                throw new FaceitApiException("FACEIT API request cancelled.");
+            }
+            catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or OperationCanceledException or IOException)
             {
                 if (attempt == MaxRequestAttempts)
                 {
@@ -460,11 +581,36 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
                 }
             }
 
-            await Task.Delay(TimeSpan.FromSeconds(attempt));
+            await Task.Delay(TimeSpan.FromSeconds(attempt), token);
         }
 
         throw new FaceitApiException("FACEIT API request failed.");
     }
+
+    private static async Task<byte[]> ReadBoundedAsync(HttpResponseMessage response, CancellationToken token)
+    {
+        if (response.Content.Headers.ContentLength is > MaxResponseBytes)
+            throw new FaceitApiException("FACEIT API response exceeded the size limit.");
+
+        await using var stream = await response.Content.ReadAsStreamAsync(token);
+        using var buffer = new MemoryStream();
+        var chunk = new byte[8192];
+
+        int read;
+        while ((read = await stream.ReadAsync(chunk, token)) > 0)
+        {
+            if (buffer.Length + read > MaxResponseBytes)
+                throw new FaceitApiException("FACEIT API response exceeded the size limit.");
+
+            buffer.Write(chunk, 0, read);
+        }
+
+        return buffer.ToArray();
+    }
+
+    private int CacheMinutes() => Math.Clamp(Config.CacheMinutes, MinCacheMinutes, MaxCacheMinutes);
+
+    private int TimeoutSeconds() => Math.Clamp(Config.RequestTimeoutSeconds, MinTimeoutSeconds, MaxTimeoutSeconds);
 
     private void ThrowIfRequestBackedOff()
     {
@@ -488,8 +634,14 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
         }
     }
 
-    private CachedData NoFaceit() => new(0, null, DateTime.UtcNow.AddMinutes(Config.CacheMinutes));
+    private CachedData NoFaceit() => new(0, null, DateTime.UtcNow.AddMinutes(CacheMinutes()));
     private static CachedData RequestFailed() => new(-1, null, DateTime.MinValue);
+
+    private void LogBackgroundFailure(Exception ex, ulong steamId)
+    {
+        if (Config.Debug)
+            Logger.LogWarning(ex, "[CS2FaceitLevels] Background FACEIT work failed for {SteamId}.", steamId);
+    }
 
     private void OnEloCommand(CCSPlayerController? caller, CommandInfo command)
     {
@@ -532,14 +684,30 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
         var targetName = matches[0].PlayerName;
         var targetSteamId = matches[0].SteamID;
 
-        Task.Run(async () =>
+        _eloCommandsInFlight.Add(callerSteamId);
+
+        _ = Task.Run(async () =>
         {
-            var data = await GetOrFetch(targetSteamId);
+            string? line = null;
+
+            try
+            {
+                var data = await GetOrFetch(targetSteamId);
+                line = EloLine(_lang.SingleEloChatFormat, targetName, targetSteamId, data);
+            }
+            catch (Exception ex)
+            {
+                LogBackgroundFailure(ex, targetSteamId);
+            }
+
             Server.NextFrame(() =>
             {
+                _eloCommandsInFlight.Remove(callerSteamId);
+                if (Stopping || line == null) return;
+
                 var c = Utilities.GetPlayerFromSlot(callerSlot);
                 if (IsValid(c) && c.SteamID == callerSteamId)
-                    c.PrintToChat(EloLine(_lang.SingleEloChatFormat, targetName, targetSteamId, data));
+                    c.PrintToChat(line);
             });
         });
     }
@@ -561,16 +729,30 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
             .OrderBy(p => p.TeamNum)
             .ThenBy(p => p.PlayerName)
             .Select(p => (p.SteamID, p.PlayerName))
+            .Take(MaxElosLines)
             .ToList();
 
-        Task.Run(async () =>
+        _eloCommandsInFlight.Add(callerSteamId);
+
+        _ = Task.Run(async () =>
         {
             var lines = new List<string>();
-            foreach (var (steamId, name) in targets)
-                lines.Add(EloLine(_lang.AllElosChatFormat, name, steamId, await GetOrFetch(steamId)));
+
+            try
+            {
+                foreach (var (steamId, name) in targets)
+                    lines.Add(EloLine(_lang.AllElosChatFormat, name, steamId, await GetOrFetch(steamId)));
+            }
+            catch (Exception ex)
+            {
+                LogBackgroundFailure(ex, callerSteamId);
+            }
 
             Server.NextFrame(() =>
             {
+                _eloCommandsInFlight.Remove(callerSteamId);
+                if (Stopping || lines.Count == 0) return;
+
                 var c = Utilities.GetPlayerFromSlot(callerSlot);
                 if (!IsValid(c) || c.SteamID != callerSteamId)
                     return;
@@ -600,33 +782,55 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
         }
         finally
         {
-            _fetching.TryRemove(steamId, out _);
+            _fetching.TryRemove(new KeyValuePair<ulong, Lazy<Task<CachedData>>>(steamId, request));
         }
     }
 
     private async Task<CachedData> FetchAndCache(ulong steamId)
     {
+        var acquired = false;
+
         try
         {
-            var data = await FetchFromFaceit(steamId);
+            acquired = await _pendingRequestSlots.WaitAsync(0, _cts.Token);
+            if (!acquired)
+                return RequestFailed();
+
+            var data = await FetchFromFaceit(steamId, _cts.Token);
             _cache[steamId] = data;
-            _ = SavePersistentCache();
+            MarkCacheDirty();
+            LimitCacheSize();
             return data;
         }
-        catch (FaceitApiException ex)
+        catch (OperationCanceledException)
+        {
+            return RequestFailed();
+        }
+        catch (Exception ex)
         {
             if (Config.Debug)
                 Logger.LogWarning(ex, "[CS2FaceitLevels] FACEIT lookup failed for {SteamId}.", steamId);
 
-            if (_cache.TryGetValue(steamId, out var cached))
+            if (_cache.TryGetValue(steamId, out var cached) && cached.ExpiresAt > DateTime.UtcNow)
                 return cached;
 
-            return RequestFailed();
+            var failure = new CachedData(-1, null, DateTime.UtcNow.AddMinutes(FailureCacheMinutes));
+            _cache[steamId] = failure;
+            LimitCacheSize();
+            return failure;
+        }
+        finally
+        {
+            if (acquired)
+                _pendingRequestSlots.Release();
         }
     }
 
     private bool CanUseEloCommand(ulong steamId)
     {
+        if (_eloCommandsInFlight.Contains(steamId))
+            return false;
+
         var now = Environment.TickCount64;
         if (_eloCommandTimes.TryGetValue(steamId, out var lastUsed)
             && now - lastUsed < EloCommandCooldownMs)
@@ -640,7 +844,12 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
 
     private CS2FaceitLevelsLang LoadLanguage(string language)
     {
-        var name = string.IsNullOrWhiteSpace(language) ? "en" : language.Trim();
+        var requested = string.IsNullOrWhiteSpace(language) ? "en" : language.Trim();
+
+        var name = Path.GetFileName(requested);
+        if (string.IsNullOrEmpty(name))
+            name = "en";
+
         var langDirectory = Path.Combine(ModuleDirectory, "lang");
         var path = Path.Combine(langDirectory, name + ".json");
 
@@ -654,9 +863,17 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
         {
             if (File.Exists(path))
             {
+                var info = new FileInfo(path);
+                if (info.Length > MaxLanguageFileBytes)
+                {
+                    Logger.LogWarning("[CS2FaceitLevels] Language file {Path} is unexpectedly large ({Bytes} bytes), using built-in English.",
+                        path, info.Length);
+                    return new CS2FaceitLevelsLang();
+                }
+
                 var lang = JsonSerializer.Deserialize<CS2FaceitLevelsLang>(File.ReadAllText(path), JsonOptions);
                 if (lang != null)
-                    return lang;
+                    return lang.Normalized();
             }
         }
         catch (Exception ex)
