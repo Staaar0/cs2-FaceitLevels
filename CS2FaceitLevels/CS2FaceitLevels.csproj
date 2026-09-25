@@ -5,6 +5,7 @@
     <Nullable>enable</Nullable>
     <LangVersion>latest</LangVersion>
     <AssemblyName>CS2FaceitLevels</AssemblyName>
+    <Version>1.1.0</Version>
     <RootNamespace>CS2FaceitLevels</RootNamespace>
     <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
   </PropertyGroup>
@@ -15,5 +16,6 @@
 
   <ItemGroup>
     <Content Include="lang\*.json" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="workshop.gamedata.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

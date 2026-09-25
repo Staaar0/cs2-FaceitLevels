@@ -1,3 +1,5 @@
+using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Text;
 using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
@@ -11,6 +13,26 @@ internal sealed class EloCommands(PlayerSessions sessions, FaceitLookup lookup, 
 {
     private const long CooldownMs = 10_000;
     private const int MaxLines = 32;
+
+    // Preparing methods compiles their managed code without calling game natives.
+    // The sample below also initializes the formatting paths used by both commands.
+    internal void Prewarm(ChatFormatter chat)
+    {
+        const BindingFlags instance = BindingFlags.Instance | BindingFlags.NonPublic;
+        const BindingFlags statics = BindingFlags.Static | BindingFlags.NonPublic;
+        foreach (var name in new[] { nameof(Single), nameof(All) })
+            RuntimeHelpers.PrepareMethod(typeof(EloCommands).GetMethod(name, instance)!.MethodHandle);
+        foreach (var name in new[] { nameof(CanUse), nameof(SnapshotPlayers), nameof(JoinArgs) })
+            RuntimeHelpers.PrepareMethod(typeof(EloCommands).GetMethod(name, statics)!.MethodHandle);
+
+        var sample = new FaceitData(1, 100, DateTime.UtcNow);
+        _ = chat.SingleLine("Player", 0, sample);
+        _ = chat.AllLine("Player", 0, sample);
+        _ = chat.PlayerOnly();
+        _ = chat.MissingName();
+        _ = chat.NoMatch("Player");
+        _ = chat.Multiple("Player");
+    }
 
     internal void Single(CCSPlayerController? caller, CommandInfo command)
     {

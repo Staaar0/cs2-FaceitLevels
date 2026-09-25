@@ -33,6 +33,7 @@ jobs:
           mkdir -p package/addons/counterstrikesharp/plugins/CS2FaceitLevels
 
           cp CS2FaceitLevels/bin/Release/net10.0/CS2FaceitLevels.dll package/addons/counterstrikesharp/plugins/CS2FaceitLevels/
+          cp CS2FaceitLevels/bin/Release/net10.0/workshop.gamedata.json package/addons/counterstrikesharp/plugins/CS2FaceitLevels/
 
           if [ -d CS2FaceitLevels/bin/Release/net10.0/lang ]; then
             cp -r CS2FaceitLevels/bin/Release/net10.0/lang package/addons/counterstrikesharp/plugins/CS2FaceitLevels/
@@ -45,6 +46,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          TAG="build-${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}"
+          VERSION="$(dotnet msbuild CS2FaceitLevels/CS2FaceitLevels.csproj -getProperty:Version)"
+          TAG="v${VERSION}-${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}"
 
-          gh release create "$TAG"             CS2FaceitLevels.zip             --title "CS2FaceitLevels Build #${GITHUB_RUN_NUMBER}"             --notes ""
+          gh release create "$TAG" \
+            CS2FaceitLevels.zip \
+            --title "CS2FaceitLevels ${VERSION} (build ${GITHUB_RUN_NUMBER})" \
+            --notes "FACEIT scoreboard levels, ELO chat commands, and built-in Workshop badge downloads for Linux and Windows x64. Requires CounterStrikeSharp and Metamod."

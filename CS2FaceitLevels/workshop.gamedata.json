@@ -1,0 +1,40 @@
+{
+  "Platforms": {
+    "linux": {
+      "ReplyConnectionSignature": "55 B9 ? ? ? ? 41 B8",
+      "ClientVTable": "CServerSideClient",
+      "SendNetMessageIndex": 16,
+      "ServerAddonsOffset": 376,
+      "ClientSlotOffset": 72,
+      "EngineInterface": "Source2EngineToServer001",
+      "GetClientXuidIndex": 81,
+      "GetAppIdIndex": 68,
+      "ClientServerOffset": 80,
+      "UserMessagePayloadOffset": 0,
+      "SendServerInfoSignature": "48 83 7F ? ? 0F 84 ? ? ? ? 55 48 89 E5 41 57 41 56 49 89 F6",
+      "SendServerInfoIndex": 52,
+      "ServerVTable": "CNetworkGameServerBase",
+      "FillServerInfoIndex": 80,
+      "HostStateRequestSignature": "55 48 89 E5 41 56 41 55 41 54 49 89 F4 53 48 83 7F",
+      "HostStateRequestAddonsOffset": 88
+    },
+    "windows": {
+      "ReplyConnectionSignature": "48 8B C4 55 41 55 41 56",
+      "ClientVTable": "CServerSideClient",
+      "SendNetMessageIndex": 15,
+      "ServerAddonsOffset": 376,
+      "ClientSlotOffset": 72,
+      "EngineInterface": "Source2EngineToServer001",
+      "GetClientXuidIndex": 81,
+      "GetAppIdIndex": 68,
+      "ClientServerOffset": 80,
+      "UserMessagePayloadOffset": 0,
+      "SendServerInfoSignature": "48 8B C4 48 89 50 ? 48 89 48 ? 55 53 57 41 57",
+      "SendServerInfoIndex": 48,
+      "ServerVTable": "CNetworkGameServerBase",
+      "FillServerInfoIndex": 75,
+      "HostStateRequestSignature": "48 89 74 24 ? 57 48 83 EC ? 33 F6 48 8B FA 48 39 35",
+      "HostStateRequestAddonsOffset": 88
+    }
+  }
+}

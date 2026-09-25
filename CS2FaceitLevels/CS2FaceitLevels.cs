@@ -3,6 +3,7 @@ using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Core.Attributes;
 using CounterStrikeSharp.API.Modules.Timers;
 using Microsoft.Extensions.Logging;
+using CS2FaceitLevels.Workshop;
 
 namespace CS2FaceitLevels;
 
@@ -11,7 +12,7 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
 {
     public override string ModuleName => "CS2FaceitLevels";
     public override string ModuleAuthor => "✪ Stαr";
-    public override string ModuleVersion => "1.0.9";
+    public override string ModuleVersion => "1.1.0";
     public override string ModuleDescription => "Shows real FACEIT levels in the CS2 scoreboard.";
 
     private readonly PlayerSessions _sessions = new();
@@ -24,6 +25,7 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
     private bool _reloadOnFirstConnect;
     private long _mapGeneration;
     private bool _unloading;
+    private WorkshopLoader? _workshop;
 
     public CS2FaceitLevelsConfig Config { get; set; } = new();
 
@@ -45,6 +47,12 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
             () => Config.Debug, Logger);
         _pins = new PinEnforcer(_sessions, () => Config, Logger);
         _commands = new EloCommands(_sessions, _lookup, _work, () => _chat, () => Config.Debug, Logger);
+        var workshopReloadState = WorkshopReloadBridge.Take(ModuleDirectory, hotReload);
+        if (Config.BuiltinWorkshopLoader)
+        {
+            _workshop = new WorkshopLoader(ModuleDirectory, Logger, () => Config.Debug);
+            _workshop.RestoreReload(workshopReloadState);
+        }
 
         RegisterEventHandler<EventPlayerConnectFull>(OnPlayerConnectFull);
         RegisterEventHandler<EventPlayerSpawn>(OnPlayerSpawn);
@@ -55,27 +63,59 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
         RegisterListener<Listeners.OnClientPutInServer>(OnClientPutInServer);
         RegisterListener<Listeners.OnClientDisconnect>(OnClientDisconnect);
         RegisterListener<Listeners.OnMapStart>(OnMapStart);
+        RegisterListener<Listeners.OnClientConnect>((slot, name, ip) =>
+        {
+            _workshop?.ClientConnect(slot);
+        });
+        AddCommand("css_faceit_workshop_status", "Show the Workshop loader status (server console).", (player, command) =>
+        {
+            if (player == null) command.ReplyToCommand(_workshop?.Summary ?? "Built-in Workshop loader disabled by config.");
+        });
 
         if (hotReload)
         {
             foreach (var player in Utilities.GetPlayers())
                 if (PlayerAccess.TryIdentity(player, out var steamId))
+                {
                     _sessions.GetOrAdd(player.Slot, steamId).EnforcePin = true;
+                    if (PlayerAccess.TryIdentity(player, out _, connected: true))
+                        _workshop?.ClientActive(player.Slot, steamId);
+                }
         }
+        // Preserve the original first-player reload required by pin protection.
+        // Workshop handshakes are handed to the new instance during hot reload.
         _reloadOnFirstConnect = !hotReload;
         AddTimer(60f, _cache.RequestMaintenance, TimerFlags.REPEAT);
+        if (_workshop != null) AddTimer(30f, _workshop.Maintenance, TimerFlags.REPEAT);
         if (Config.EnableEloCommands)
         {
             AddCommand("css_elo", "Show a player's FACEIT elo.", _commands.Single);
             AddCommand("css_elos", "Show every player's FACEIT elo.", _commands.All);
+            // Compile the two chat command paths off-thread, without accessing players
+            // or sending requests to FACEIT during startup or the first-player reload.
+            _work.Run(() =>
+            {
+                _commands.Prewarm(_chat);
+                return Task.CompletedTask;
+            });
         }
         AddTimer(2f, () => RefreshAll(force: hotReload), TimerFlags.STOP_ON_MAPCHANGE);
+        // On hot reload the network message system is already initialized. Reattach
+        // before returning from Load so concurrent connections have no frame-long gap.
+        if (hotReload) _workshop?.Start();
+    }
+
+    public override void OnAllPluginsLoaded(bool hotReload)
+    {
+        Server.NextWorldUpdate(() => { if (!_unloading) _workshop?.Start(); });
     }
 
     public override void Unload(bool hotReload)
     {
         if (_unloading) return;
         _unloading = true;
+        _workshop?.PreserveReload(hotReload);
+        _workshop?.Dispose();
         _sessions.Clear();
         var pending = _work.Stop();
         var shutdown = Task.Run(() => _cache.Stop(pending, TimeSpan.FromSeconds(2.5)));
@@ -101,6 +141,7 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
 
     private void OnMapStart(string mapName)
     {
+        Server.NextWorldUpdate(() => { if (!_unloading) _workshop?.Start(); });
         _mapGeneration++;
         foreach (var session in _sessions.Active)
         {
@@ -112,6 +153,8 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
 
     private HookResult OnPlayerConnectFull(EventPlayerConnectFull e, GameEventInfo info)
     {
+        if (PlayerAccess.TryIdentity(e.Userid, out var linkedSteamId))
+            _workshop?.ClientActive(e.Userid.Slot, linkedSteamId);
         if (_reloadOnFirstConnect && PlayerAccess.TryIdentity(e.Userid, out _))
         {
             _reloadOnFirstConnect = false;
@@ -148,7 +191,11 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
         });
     }
 
-    private void OnClientDisconnect(int slot) => _sessions.Remove(slot);
+    private void OnClientDisconnect(int slot)
+    {
+        _workshop?.ClientDisconnect(slot);
+        _sessions.Remove(slot);
+    }
 
     private HookResult OnPlayerDisconnect(EventPlayerDisconnect e, GameEventInfo info)
     {

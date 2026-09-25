@@ -25,6 +25,9 @@ public sealed class CS2FaceitLevelsConfig : BasePluginConfig
 
     [JsonPropertyName("enable_elo_commands")]
     public bool EnableEloCommands { get; set; } = true;
+
+    [JsonPropertyName("builtin_workshop_loader")]
+    public bool BuiltinWorkshopLoader { get; set; } = true;
 }
 
 public sealed class CS2FaceitLevelsLang

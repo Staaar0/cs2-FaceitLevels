@@ -14,9 +14,7 @@ The plugin does this:
 ## Requirements
 
 - [CounterStrikeSharp](https://github.com/roflmuffin/CounterStrikeSharp)
-- [MultiAddonManager](https://github.com/Source2ZE/MultiAddonManager)
 - [Faceit API Key](https://developers.faceit.com/)
-- [this workshop addon](https://steamcommunity.com/sharedfiles/filedetails/?id=3724637448) [addon ID: 3724637448]
 
 ## ELO Chat Commands
 
@@ -54,11 +52,17 @@ Default language:
 "language": "en"
 ```
 
-## MultiAddonManager Setup
-
-- you will need this addon ID [3724637448] if you want the plugin to work
-- MultiAddonManager config path: game\csgo\cfg\multiaddonmanager
-
-```
-mm_extra_addons "3724637448"
+## Default Config
+```json
+{
+  "faceit_api_key": "PUT_YOUR_FACEIT_API_KEY_HERE",
+  "language": "en",
+  "debug": false,
+  "cache_minutes": 30,
+  "request_timeout_seconds": 10,
+  "clear_pin_when_no_faceit": false,
+  "enable_elo_commands": true,
+  "builtin_workshop_loader": true,
+  "ConfigVersion": 1
+}
 ```
