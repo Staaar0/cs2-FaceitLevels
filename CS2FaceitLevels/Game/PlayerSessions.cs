@@ -16,6 +16,8 @@ internal sealed class PlayerSession(int slot, ulong steamId, long generation, in
     internal MedalRank_t? DesiredPin;
     internal bool RefreshPending;
     internal long RefreshRequest;
+    internal bool InventoryRetryPending;
+    internal int InventoryRetryAttempts;
     internal long? LastCommandTime;
     internal bool CommandPending;
 }

@@ -9,6 +9,9 @@ internal sealed class PinEnforcer(PlayerSessions sessions, Func<CS2FaceitLevelsC
 {
     private const int RankIndex = 5;
 
+    internal static bool InventoryReady(CCSPlayerController player) =>
+        player.InventoryServices is { } inventory && inventory.Rank.Length > RankIndex;
+
     // Called at the original OnTick frequency. The controller/inventory is
     // resolved afresh; no native handle survives a frame or reconnect.
     internal void Enforce()

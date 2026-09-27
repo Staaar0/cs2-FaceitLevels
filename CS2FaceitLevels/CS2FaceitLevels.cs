@@ -25,6 +25,7 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
     private bool _reloadOnFirstConnect;
     private long _mapGeneration;
     private bool _unloading;
+    private static readonly float[] InventoryRetryDelays = [0.5f, 1f, 2f];
     private WorkshopLoader? _workshop;
     private bool _ownsMamBadge;
     private bool _mamRegistrationPending;
@@ -56,8 +57,6 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
 
         RegisterEventHandler<EventPlayerConnectFull>(OnPlayerConnectFull);
         RegisterEventHandler<EventPlayerSpawn>(OnPlayerSpawn);
-        RegisterEventHandler<EventPlayerTeam>(OnPlayerTeam);
-        RegisterEventHandler<EventRoundStart>(OnRoundStart);
         RegisterEventHandler<EventPlayerDisconnect>(OnPlayerDisconnect);
         RegisterListener<Listeners.OnTick>(EnforcePins);
         RegisterListener<Listeners.OnClientPutInServer>(OnClientPutInServer);
@@ -195,6 +194,8 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
         {
             session.RefreshPending = false;
             session.RefreshRequest++;
+            session.InventoryRetryPending = false;
+            session.InventoryRetryAttempts = 0;
         }
         AddTimer(2f, () => RefreshAll(force: false), TimerFlags.STOP_ON_MAPCHANGE);
     }
@@ -215,12 +216,6 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
     }
 
     private HookResult OnPlayerSpawn(EventPlayerSpawn e, GameEventInfo info) => Refresh(e.Userid, 0.2f);
-    private HookResult OnPlayerTeam(EventPlayerTeam e, GameEventInfo info) => Refresh(e.Userid, 0.5f);
-    private HookResult OnRoundStart(EventRoundStart e, GameEventInfo info)
-    {
-        AddTimer(1f, () => RefreshAll(force: false), TimerFlags.STOP_ON_MAPCHANGE);
-        return HookResult.Continue;
-    }
 
     private void EnforcePins()
     {
@@ -261,8 +256,9 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
             // In-game events re-arm pin protection, so it never depends on the timing of
             // OnClientPutInServer or the first-player reload (Workshop downloads, reconnects).
             session.EnforcePin = true;
+            session.InventoryRetryAttempts = 0;
             var map = _mapGeneration;
-            // Preserve event delays: these retries cover temporarily missing inventory services.
+            // Preserve the short spawn/connect delay; missing inventories get bounded retries.
             AddTimer(delay, () =>
             {
                 if (map == _mapGeneration) RefreshSlot(session, force: false);
@@ -286,6 +282,12 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
     private void RefreshSlot(PlayerSession session, bool force)
     {
         if (Stopping || !_sessions.TryResolve(session, out var player)) return;
+        if (!PinEnforcer.InventoryReady(player)) ScheduleInventoryRetry(session);
+        else
+        {
+            session.InventoryRetryPending = false;
+            session.InventoryRetryAttempts = 0;
+        }
         if (!force && _cache.TryGetFresh(session.SteamId, out var cached))
         {
             _pins.Apply(session, player, cached);
@@ -312,9 +314,29 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
                         if (Stopping || map != _mapGeneration || !_sessions.IsCurrent(session) ||
                             request != session.RefreshRequest) return;
                         session.RefreshPending = false;
-                        if (data != null && _sessions.TryResolve(session, out var current)) _pins.Apply(session, current, data);
+                        if (data != null && _sessions.TryResolve(session, out var current))
+                        {
+                            _pins.Apply(session, current, data);
+                            if (data.Level >= 0 && !PinEnforcer.InventoryReady(current))
+                                ScheduleInventoryRetry(session);
+                        }
                     });
             }
         }, session.SteamId);
+    }
+
+    private void ScheduleInventoryRetry(PlayerSession session)
+    {
+        if (session.InventoryRetryPending || session.InventoryRetryAttempts >= InventoryRetryDelays.Length) return;
+        var delay = InventoryRetryDelays[session.InventoryRetryAttempts++];
+        var map = _mapGeneration;
+        session.InventoryRetryPending = true;
+        AddTimer(delay, () =>
+        {
+            if (Stopping || map != _mapGeneration || !_sessions.IsCurrent(session) ||
+                !session.InventoryRetryPending) return;
+            session.InventoryRetryPending = false;
+            RefreshSlot(session, force: false);
+        }, TimerFlags.STOP_ON_MAPCHANGE);
     }
 }
