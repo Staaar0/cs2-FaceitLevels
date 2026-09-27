@@ -4,7 +4,7 @@ namespace CS2FaceitLevels.Workshop;
 // the deadline. All state is owned by the game thread, including timer callbacks.
 internal sealed class ConnectionDeadlines
 {
-    public const double TimeoutSeconds = 30;
+    public const double TimeoutSeconds = 10;
     internal sealed record Waiting(int Slot, ulong SteamId, double Started);
     private readonly Dictionary<int, Waiting> _waiting = new();
     public int Count => _waiting.Count;

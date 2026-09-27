@@ -26,6 +26,8 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
     private long _mapGeneration;
     private bool _unloading;
     private WorkshopLoader? _workshop;
+    private bool _ownsMamBadge;
+    private bool _mamRegistrationPending;
 
     public CS2FaceitLevelsConfig Config { get; set; } = new();
 
@@ -48,11 +50,9 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
         _pins = new PinEnforcer(_sessions, () => Config, Logger);
         _commands = new EloCommands(_sessions, _lookup, _work, () => _chat, () => Config.Debug, Logger);
         var workshopReloadState = WorkshopReloadBridge.Take(ModuleDirectory, hotReload);
-        if (Config.BuiltinWorkshopLoader)
-        {
-            _workshop = new WorkshopLoader(ModuleDirectory, Logger, () => Config.Debug);
-            _workshop.RestoreReload(workshopReloadState);
-        }
+        _ownsMamBadge = WorkshopReloadBridge.TakeMamOwnership(ModuleDirectory, hotReload);
+        _workshop = new WorkshopLoader(ModuleDirectory, Logger, () => Config.Debug);
+        _workshop.RestoreReload(workshopReloadState);
 
         RegisterEventHandler<EventPlayerConnectFull>(OnPlayerConnectFull);
         RegisterEventHandler<EventPlayerSpawn>(OnPlayerSpawn);
@@ -69,7 +69,7 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
         });
         AddCommand("css_faceit_workshop_status", "Show the Workshop loader status (server console).", (player, command) =>
         {
-            if (player == null) command.ReplyToCommand(_workshop?.Summary ?? "Built-in Workshop loader disabled by config.");
+            if (player == null) command.ReplyToCommand(_workshop?.Summary ?? "Workshop loader has not started.");
         });
 
         if (hotReload)
@@ -102,12 +102,52 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
         AddTimer(2f, () => RefreshAll(force: hotReload), TimerFlags.STOP_ON_MAPCHANGE);
         // On hot reload the network message system is already initialized. Reattach
         // before returning from Load so concurrent connections have no frame-long gap.
-        if (hotReload) _workshop?.Start();
+        if (hotReload) StartWorkshop();
     }
 
     public override void OnAllPluginsLoaded(bool hotReload)
     {
-        Server.NextWorldUpdate(() => { if (!_unloading) _workshop?.Start(); });
+        // The first connection can arrive before a queued world update runs.
+        // Attach the loader as soon as CSS has finished loading plugins.
+        StartWorkshop();
+    }
+
+    private void StartWorkshop()
+    {
+        if (_unloading || _workshop == null) return;
+        if (WorkshopLoader.OtherLoaderPresent() && !WorkshopLoader.MamHasBadge())
+        {
+            if (_mamRegistrationPending) return;
+            // Let MAM own the complete download and reconnect sequence when it is
+            // installed. This changes MAM's in-memory client list, not its cfg file.
+            _mamRegistrationPending = true;
+            Server.ExecuteCommand($"mm_add_client_addon {WorkshopLoader.AddonId}");
+            ConfirmMamRegistration(0);
+            return;
+        }
+        _workshop.Start();
+    }
+
+    private void ConfirmMamRegistration(int attempt)
+    {
+        if (_unloading || !_mamRegistrationPending) return;
+        if (WorkshopLoader.MamHasClientBadge())
+        {
+            _ownsMamBadge = true;
+            _mamRegistrationPending = false;
+            StartWorkshop();
+        }
+        else if (attempt < 4)
+        {
+            // Server commands may run after the current plugin callback. A pre-world
+            // update also runs on hibernating servers before their first player joins.
+            Server.NextWorldUpdate(() => ConfirmMamRegistration(attempt + 1));
+        }
+        else
+        {
+            _mamRegistrationPending = false;
+            Logger.LogError("[CS2FaceitLevels] MultiAddonManager did not register the badge addon. Check that mm_add_client_addon is available.");
+        }
     }
 
     public override void Unload(bool hotReload)
@@ -116,6 +156,9 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
         _unloading = true;
         _workshop?.PreserveReload(hotReload);
         _workshop?.Dispose();
+        WorkshopReloadBridge.SaveMamOwnership(ModuleDirectory, hotReload && _ownsMamBadge);
+        if (!hotReload && _ownsMamBadge && WorkshopLoader.MamHasClientBadge())
+            Server.ExecuteCommand($"mm_remove_client_addon {WorkshopLoader.AddonId}");
         _sessions.Clear();
         var pending = _work.Stop();
         var shutdown = Task.Run(() => _cache.Stop(pending, TimeSpan.FromSeconds(2.5)));
@@ -141,7 +184,7 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
 
     private void OnMapStart(string mapName)
     {
-        Server.NextWorldUpdate(() => { if (!_unloading) _workshop?.Start(); });
+        Server.NextWorldUpdate(StartWorkshop);
         _mapGeneration++;
         foreach (var session in _sessions.Active)
         {

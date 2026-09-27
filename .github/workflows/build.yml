@@ -52,4 +52,4 @@ jobs:
           gh release create "$TAG" \
             CS2FaceitLevels.zip \
             --title "CS2FaceitLevels ${VERSION} (build ${GITHUB_RUN_NUMBER})" \
-            --notes "FACEIT scoreboard levels, ELO chat commands, and built-in Workshop badge downloads for Linux and Windows x64. Requires CounterStrikeSharp and Metamod."
+            --notes "FACEIT scoreboard levels, ELO chat commands, and automatic Workshop badge downloads through MAM when installed or the built-in loader otherwise. Requires CounterStrikeSharp and Metamod."

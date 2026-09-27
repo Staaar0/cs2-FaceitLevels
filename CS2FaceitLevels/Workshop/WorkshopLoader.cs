@@ -67,13 +67,20 @@ internal sealed class WorkshopLoader : IDisposable
 
     public void Start()
     {
-        if (_disposed || _replyHooked || _faulted) return;
-        if (OtherLoaderPresent())
+        if (_disposed || _faulted) return;
+        if (MamHasBadge())
         {
-            Status = "Disabled: MultiAddonManager detected";
-            _log.LogWarning("[CS2FaceitLevels] {Status}. Remove it and fully restart to enable the built-in loader.", Status);
+            // MAM may have been loaded after the built-in hooks on a running
+            // server. Once it owns the badge, never run both network paths.
+            if (_replyHooked) Detach();
+            if (Status != "Managed by MultiAddonManager")
+            {
+                Status = "Managed by MultiAddonManager";
+                _log.LogInformation("[CS2FaceitLevels] Addon has been loaded from MultiAddonManager.");
+            }
             return;
         }
+        if (_replyHooked) return;
         try
         {
             _layout = EngineLayout.Read(_directory);
@@ -182,7 +189,7 @@ internal sealed class WorkshopLoader : IDisposable
             // players. Ordinary game timers/NextFrame can stop during hibernation.
             _deadlineTimer = new System.Threading.Timer(_ => QueueDeadlineCheck(), null, 1000, 1000);
             Status = $"Hooks ready ({_layout.Platform})";
-            _log.LogInformation("[CS2FaceitLevels] Workshop hooks ready for {Addon}. Waiting for client handshakes.", AddonId);
+            _log.LogInformation("[CS2FaceitLevels] Addon has been loaded from built-in loader.");
         }
         catch (Exception ex)
         {
@@ -191,8 +198,21 @@ internal sealed class WorkshopLoader : IDisposable
         }
     }
 
-    private static bool OtherLoaderPresent() =>
+    internal static bool OtherLoaderPresent() =>
         ConVar.Find("mm_client_extra_addons") != null || ConVar.Find("mm_extra_addons") != null;
+
+    // Match a complete Workshop ID in either MAM list. Other IDs must remain
+    // untouched when FaceitLevels adds its badge to MAM's client-only list.
+    internal static bool HasBadge(string? addonList) => addonList?.Split(',',
+        StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+        .Contains(AddonId, StringComparer.Ordinal) ?? false;
+
+    internal static bool MamHasClientBadge() =>
+        HasBadge(ConVar.Find("mm_client_extra_addons")?.StringValue);
+
+    internal static bool MamHasBadge() =>
+        MamHasClientBadge() ||
+        HasBadge(ConVar.Find("mm_extra_addons")?.StringValue);
 
     private bool Ready => !_disposed && !_faulted;
 
@@ -236,6 +256,9 @@ internal sealed class WorkshopLoader : IDisposable
     private HookResult OnHostRequest(DynamicHook hook)
     {
         if (!Ready || !CheckThread()) return HookResult.Continue;
+        // Leave MAM's server and map addon list untouched. The badge is sent
+        // to clients by the built-in connection and signon hooks below.
+        if (OtherLoaderPresent()) return HookResult.Continue;
         try
         {
             var request = hook.GetParam<nint>(1);
@@ -266,7 +289,7 @@ internal sealed class WorkshopLoader : IDisposable
         bool called = false;
         try
         {
-            if (OtherLoaderPresent()) throw new InvalidOperationException("Another addon loader was loaded; restart with only one loader.");
+            if (MamHasBadge()) throw new InvalidOperationException("MultiAddonManager also manages the FACEIT badge addon. Remove its ID from MAM and restart.");
             var server = hook.GetParam<nint>(0);
             var client = hook.GetParam<nint>(1);
             var (steamId, slot) = Identity(client, server);

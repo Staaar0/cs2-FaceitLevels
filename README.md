@@ -62,7 +62,6 @@ Default language:
   "request_timeout_seconds": 10,
   "clear_pin_when_no_faceit": false,
   "enable_elo_commands": true,
-  "builtin_workshop_loader": true,
   "ConfigVersion": 1
 }
 ```
