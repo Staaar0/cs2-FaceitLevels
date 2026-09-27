@@ -45,6 +45,9 @@ internal sealed class PinEnforcer(PlayerSessions sessions, Func<CS2FaceitLevelsC
         var ranks = inventory.Rank;
         if (ranks.Length <= RankIndex) return;
         var pin = LevelPin(data.Level);
+        // A fresh "no FACEIT account" result invalidates any earlier assignment;
+        // Enforce() will clear FACEIT-mapped pins while keeping other pins intact.
+        if (data.Level == 0) session.DesiredPin = null;
         if (pin == null && getConfig().ClearPinWhenNoFaceit) pin = MedalRank_t.MEDAL_RANK_NONE;
         if (pin is not { } desired) return;
         session.DesiredPin = desired;

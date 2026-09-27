@@ -26,6 +26,7 @@ internal sealed class WorkshopLoader : IDisposable
     private readonly AddonHandshake _handshakes = new();
     private readonly Dictionary<int, ulong> _slots = new();
     private readonly ConnectionDeadlines _deadlines = new();
+    private readonly SendHookSchedule _sendSchedule = new();
     private System.Threading.Timer? _deadlineTimer;
     private int _waitingCount, _deadlineCheckQueued;
     private readonly int _gameThread = Environment.CurrentManagedThreadId;
@@ -45,12 +46,13 @@ internal sealed class WorkshopLoader : IDisposable
     private volatile bool _disposed;
     private volatile bool _faulted;
     private long _replies, _signons, _completed, _mountLists, _mapRequests;
-    private long _missingXuids, _timedOut;
+    private long _missingXuids, _timedOut, _sendAttaches;
 
     public string Status { get; private set; } = "Not started";
     public string Summary => $"{Status}; addon={AddonId}; replies={_replies}; signons={_signons}; " +
         $"joined={_completed}; tracked={_handshakes.Count}; missing_xuids={_missingXuids}; " +
-        $"waiting={_deadlines.Count}; timed_out={_timedOut}; mount_lists={_mountLists}; map_requests={_mapRequests}";
+        $"waiting={_deadlines.Count}; timed_out={_timedOut}; mount_lists={_mountLists}; map_requests={_mapRequests}; " +
+        $"send_hook={(_sendHooked ? "attached" : "idle")}; send_attaches={_sendAttaches}";
     private static double Now => (double)Stopwatch.GetTimestamp() / Stopwatch.Frequency;
 
     public WorkshopLoader(string directory, ILogger log, Func<bool> debug)
@@ -179,6 +181,8 @@ internal sealed class WorkshopLoader : IDisposable
             _sendReference = FunctionReference.Create(_sendHandler);
             NativeAPI.HookFunction(_sendFunction, _sendHandler, false);
             _sendHooked = true;
+            ++_sendAttaches;
+            _sendSchedule.Activity(Now);
             _replyReference = FunctionReference.Create(_replyHandler);
             NativeAPI.HookFunction(_replyFunction, _replyHandler, false);
             _replyHooked = true;
@@ -253,9 +257,58 @@ internal sealed class WorkshopLoader : IDisposable
         throw new InvalidOperationException("Server addon string exceeds the loader limit.");
     }
 
+    // SendNetMessage runs for every message to every client, and CSS allocates a callback
+    // context per call. Attach it only before the engine can send a SignonState: from
+    // ReplyConnection, ClientConnect, host-state requests and map start. Never call this
+    // from inside SendNetMessage, and never unhook while its callback is on the stack.
+    private void NeedSendHook()
+    {
+        _sendSchedule.Activity(Now);
+        if (_sendHooked || !Ready || !_replyHooked) return;
+        NativeAPI.HookFunction(_sendFunction, _sendHandler, false);
+        _sendHooked = true;
+        ++_sendAttaches;
+    }
+
+    // Timer callback on the game thread, so no SendNetMessage callback is on the stack.
+    public void ReleaseIdleSendHook()
+    {
+        if (!_sendHooked || !Ready || _insideMessage) return;
+        try
+        {
+            if (!_sendSchedule.CanRelease(Now, _deadlines.Count, _handshakes)) return;
+            NativeAPI.UnhookFunction(_sendFunction, _sendHandler, false);
+            _sendHooked = false;
+            if (_debug()) _log.LogInformation("[CS2FaceitLevels] Workshop SendNetMessage hook released until the next connection or map change.");
+        }
+        catch (Exception ex) { Fault(ex); }
+    }
+
+    public void MapStarted()
+    {
+        if (!Ready || !_replyHooked) return;
+        try
+        {
+            _sendSchedule.MapStarted(Now);
+            NeedSendHook();
+        }
+        catch (Exception ex) { Fault(ex); }
+    }
+
     private HookResult OnHostRequest(DynamicHook hook)
     {
         if (!Ready || !CheckThread()) return HookResult.Continue;
+        try
+        {
+            // CHANGELEVEL is sent after this request, so keep SendNetMessage until map start.
+            _sendSchedule.MapChangeRequested(Now);
+            NeedSendHook();
+        }
+        catch (Exception ex)
+        {
+            Fault(ex);
+            return HookResult.Continue;
+        }
         // Leave MAM's server and map addon list untouched. The badge is sent
         // to clients by the built-in connection and signon hooks below.
         if (OtherLoaderPresent()) return HookResult.Continue;
@@ -289,6 +342,7 @@ internal sealed class WorkshopLoader : IDisposable
         bool called = false;
         try
         {
+            NeedSendHook();
             if (MamHasBadge()) throw new InvalidOperationException("MultiAddonManager also manages the FACEIT badge addon. Remove its ID from MAM and restart.");
             var server = hook.GetParam<nint>(0);
             var client = hook.GetParam<nint>(1);
@@ -372,6 +426,7 @@ internal sealed class WorkshopLoader : IDisposable
             // The common path only compares vtables; do not decode gameplay packets.
             if (payload == nint.Zero) return HookResult.Continue;
             if (Marshal.ReadIntPtr(payload) != _signonVTable) return HookResult.Continue;
+            _sendSchedule.Activity(Now);
             var client = hook.GetParam<nint>(0);
             var server = Marshal.ReadIntPtr(client, _layout.ClientServerOffset);
             var (steamId, slot) = Identity(client, server);
@@ -448,6 +503,7 @@ internal sealed class WorkshopLoader : IDisposable
         if (!Ready || _getXuidFunction == nint.Zero || slot is < 0 or >= 256) return;
         try
         {
+            NeedSendHook();
             // Resolve again rather than trust a slot binding from a previous occupant.
             var steamId = GetClientXuid(slot);
             if (steamId == 0) return;
@@ -605,6 +661,7 @@ internal sealed class WorkshopLoader : IDisposable
         if (_fillServerInfoReference != null) FunctionReference.Remove(_fillServerInfoReference.Identifier);
         if (_hostRequestReference != null) FunctionReference.Remove(_hostRequestReference.Identifier);
         _replyReference = _sendReference = _fillServerInfoReference = _hostRequestReference = null;
+        _sendSchedule.Clear();
         _setUtlString = null;
         if (_tier0Module != nint.Zero)
         {

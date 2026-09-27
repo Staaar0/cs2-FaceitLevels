@@ -117,6 +117,14 @@ internal sealed class AddonHandshake
         else session.LastActivity = now; // Keep progress across the download/reconnect handshake.
     }
 
+    // Between a connection reply (or CHANGELEVEL) and player_connect_full.
+    public bool InProgress(double now, double window)
+    {
+        foreach (var session in _sessions.Values)
+            if (!session.Active && now - session.LastActivity <= window) return true;
+        return false;
+    }
+
     public void Prune(double now)
     {
         foreach (var id in _sessions.Where(x => !x.Value.Active && now - x.Value.LastActivity > 600)

@@ -86,7 +86,11 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
         // Workshop handshakes are handed to the new instance during hot reload.
         _reloadOnFirstConnect = !hotReload;
         AddTimer(60f, _cache.RequestMaintenance, TimerFlags.REPEAT);
-        if (_workshop != null) AddTimer(30f, _workshop.Maintenance, TimerFlags.REPEAT);
+        if (_workshop != null)
+        {
+            AddTimer(30f, _workshop.Maintenance, TimerFlags.REPEAT);
+            AddTimer(1f, _workshop.ReleaseIdleSendHook, TimerFlags.REPEAT);
+        }
         if (Config.EnableEloCommands)
         {
             AddCommand("css_elo", "Show a player's FACEIT elo.", _commands.Single);
@@ -184,6 +188,7 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
 
     private void OnMapStart(string mapName)
     {
+        _workshop?.MapStarted();
         Server.NextWorldUpdate(StartWorkshop);
         _mapGeneration++;
         foreach (var session in _sessions.Active)
@@ -229,7 +234,9 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
         {
             if (Stopping || !_sessions.IsPendingPut(slot, version)) return;
             var player = Utilities.GetPlayerFromSlot(slot);
-            if (PlayerAccess.TryIdentity(player, out var steamId, connected: true))
+            // The player may not report "connected" on this frame yet. Arm protection anyway:
+            // PinEnforcer itself waits until the player is connected with an inventory.
+            if (PlayerAccess.TryIdentity(player, out var steamId))
                 _sessions.GetOrAdd(slot, steamId).EnforcePin = true;
         });
     }
@@ -251,6 +258,9 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
         if (!Stopping && PlayerAccess.TryIdentity(player, out var steamId))
         {
             var session = _sessions.GetOrAdd(player.Slot, steamId);
+            // In-game events re-arm pin protection, so it never depends on the timing of
+            // OnClientPutInServer or the first-player reload (Workshop downloads, reconnects).
+            session.EnforcePin = true;
             var map = _mapGeneration;
             // Preserve event delays: these retries cover temporarily missing inventory services.
             AddTimer(delay, () =>
@@ -266,7 +276,11 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
         if (Stopping) return;
         foreach (var player in Utilities.GetPlayers())
             if (PlayerAccess.TryIdentity(player, out var steamId))
-                RefreshSlot(_sessions.GetOrAdd(player.Slot, steamId), force);
+            {
+                var session = _sessions.GetOrAdd(player.Slot, steamId);
+                session.EnforcePin = true;
+                RefreshSlot(session, force);
+            }
     }
 
     private void RefreshSlot(PlayerSession session, bool force)
