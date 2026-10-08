@@ -31,7 +31,7 @@ internal sealed class FaceitLookup(FaceitClient api, FaceitCache cache, Cancella
             if (!acquired) return FaceitData.RequestFailed;
             var data = await api.Fetch(steamId, token).ConfigureAwait(false);
             token.ThrowIfCancellationRequested();
-            cache.Store(steamId, data);
+            if (data != FaceitData.RequestFailed) cache.Store(steamId, data);
             return data;
         }
         catch (OperationCanceledException) { return FaceitData.RequestFailed; }

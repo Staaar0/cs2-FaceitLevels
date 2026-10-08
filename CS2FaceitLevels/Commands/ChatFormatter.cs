@@ -20,8 +20,8 @@ internal sealed class ChatFormatter
 
     internal string PlayerOnly() => Format(_lang.PlayerOnlyMessage);
     internal string MissingName() => Format(_lang.MissingPlayerNameMessage);
-    internal string NoMatch(string search) => Format(_lang.NoPlayerFoundMessage, ("SEARCH", search));
-    internal string Multiple(string names) => Format(_lang.MultiplePlayersFoundMessage, ("PLAYERS", names));
+    internal string NoMatch(string search) => Format(_lang.NoPlayerFoundMessage, "SEARCH", search);
+    internal string Multiple(string names) => Format(_lang.MultiplePlayersFoundMessage, "PLAYERS", names);
     internal string SingleLine(string name, ulong steamId, FaceitData data) => EloLine(_single[data.SkillLevel], name, steamId, data);
     internal string AllLine(string name, ulong steamId, FaceitData data) => EloLine(_all[data.SkillLevel], name, steamId, data);
 
@@ -31,15 +31,14 @@ internal sealed class ChatFormatter
         .Replace("{LABEL_COLOR}", "{LIGHTPURPLE}", StringComparison.OrdinalIgnoreCase)
         .Replace("{ELO_COLOR}", EloColor(skill), StringComparison.OrdinalIgnoreCase);
 
-    // Keep dynamic substitution order and color processing after player-name insertion.
+    // Insert player text after formatting the template.
     private static string EloLine(string template, string playerName, ulong steamId, FaceitData data)
     {
         var message = template
-            .Replace("{PLAYER}", playerName, StringComparison.OrdinalIgnoreCase)
             .Replace("{STEAMID64}", steamId.ToString(), StringComparison.OrdinalIgnoreCase)
             .Replace("{ELO}", data.Elo?.ToString() ?? "N/A", StringComparison.OrdinalIgnoreCase)
             .Replace("{LEVEL}", data.SkillLevel > 0 ? data.SkillLevel.ToString() : "N/A", StringComparison.OrdinalIgnoreCase);
-        return ApplyColors(message);
+        return ApplyColors(message).Replace("{PLAYER}", Literal(playerName), StringComparison.OrdinalIgnoreCase);
     }
 
     private static readonly (string Tag, string Value)[] Colors = new Dictionary<string, char>(StringComparer.OrdinalIgnoreCase)
@@ -54,14 +53,14 @@ internal sealed class ChatFormatter
         ["magenta"] = ChatColors.Magenta, ["bluegrey"] = ChatColors.BlueGrey,
     }.Select(p => ("{" + p.Key + "}", p.Value.ToString())).ToArray();
 
-    private string Format(string template, params (string Key, string Value)[] replacements)
+    private string Format(string template) => ApplyColors(template.Replace("{PREFIX}", _lang.ChatPrefix, StringComparison.OrdinalIgnoreCase));
+
+    private string Format(string template, string key, string value) =>
+        Format(template).Replace("{" + key + "}", Literal(value), StringComparison.OrdinalIgnoreCase);
+
+    private static string Literal(string value)
     {
-        var message = template.Replace("{PREFIX}", _lang.ChatPrefix, StringComparison.OrdinalIgnoreCase);
-
-        foreach (var (key, value) in replacements)
-            message = message.Replace("{" + key + "}", value, StringComparison.OrdinalIgnoreCase);
-
-        return ApplyColors(message);
+        return new string(value.Where(character => !char.IsControl(character) && character is not '\u2028' and not '\u2029').ToArray());
     }
 
     private static string EloColor(int skillLevel) => skillLevel switch

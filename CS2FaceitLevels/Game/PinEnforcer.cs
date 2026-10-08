@@ -12,8 +12,7 @@ internal sealed class PinEnforcer(PlayerSessions sessions, Func<CS2FaceitLevelsC
     internal static bool InventoryReady(CCSPlayerController player) =>
         player.InventoryServices is { } inventory && inventory.Rank.Length > RankIndex;
 
-    // Called at the original OnTick frequency. The controller/inventory is
-    // resolved afresh; no native handle survives a frame or reconnect.
+    // Resolve the controller and inventory each tick; never keep native handles.
     internal void Enforce()
     {
         var players = sessions.Active;
@@ -34,7 +33,7 @@ internal sealed class PinEnforcer(PlayerSessions sessions, Func<CS2FaceitLevelsC
             }
             else
             {
-                // Retain cleanup of FACEIT-mapped pins on players with no assignment.
+                // Clear a FACEIT pin when this player has no assignment.
                 if (!IsFaceitPin(current)) continue;
                 ranks[RankIndex] = MedalRank_t.MEDAL_RANK_NONE;
             }
@@ -48,8 +47,7 @@ internal sealed class PinEnforcer(PlayerSessions sessions, Func<CS2FaceitLevelsC
         var ranks = inventory.Rank;
         if (ranks.Length <= RankIndex) return;
         var pin = LevelPin(data.Level);
-        // A fresh "no FACEIT account" result invalidates any earlier assignment;
-        // Enforce() will clear FACEIT-mapped pins while keeping other pins intact.
+        // Forget the old assignment; Enforce() clears only FACEIT pins.
         if (data.Level == 0) session.DesiredPin = null;
         if (pin == null && getConfig().ClearPinWhenNoFaceit) pin = MedalRank_t.MEDAL_RANK_NONE;
         if (pin is not { } desired) return;

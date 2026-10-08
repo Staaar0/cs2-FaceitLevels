@@ -2,8 +2,7 @@ using System.Text.Json;
 
 namespace CS2FaceitLevels.Workshop;
 
-// Pure protocol state. Only called on the game thread; no files, HTTP or game natives.
-// Download progress belongs to a Steam ID, never a recyclable player slot.
+// Game-thread state. Track downloads by Steam ID because player slots get reused.
 internal sealed class AddonHandshake
 {
     private const int MaxSessions = 256;
@@ -29,15 +28,13 @@ internal sealed class AddonHandshake
                 throw new InvalidOperationException("The engine addon list has an unexpected format.");
             if (id != badgeAddon && !result.Contains(id, StringComparer.Ordinal)) result.Add(id);
         }
-        // Keep the badge override last, after the playable map/dependencies, even
-        // when the engine's list already contains it from an earlier handshake.
+        // The badge must load last so its images override the map's assets.
         result.Add(badgeAddon);
         if (result.Count > 16) throw new InvalidOperationException("Too many addons for the Workshop loader.");
         return result.ToArray();
     }
 
-    // CHANGELEVEL describes the destination, not the old server's addon list.
-    // An empty list on a stock map still needs the badge addon mounted.
+    // Use the destination map's addons. Stock maps still need the badge.
     public static string MapChangeAddon(string destinationAddons, string badgeAddon)
         => Required(destinationAddons, badgeAddon)[0];
 
@@ -45,8 +42,7 @@ internal sealed class AddonHandshake
     {
         if (_sessions.TryGetValue(steamId, out var found)) return found;
         Prune(now);
-        // This is only a progress cache. Discarding old progress requests the addon
-        // again; it must never disable the loader. Live slot deadlines are separate.
+        // Dropping old progress only asks Steam to check the addon again.
         if (_sessions.Count >= MaxSessions)
             _sessions.Remove(_sessions.OrderBy(x => x.Value.Active)
                 .ThenBy(x => x.Value.LastActivity).First().Key);
@@ -58,19 +54,17 @@ internal sealed class AddonHandshake
     public string Reply(ulong steamId, string[] required, double now)
     {
         var session = Get(steamId, now);
-        // A later visit must go through Steam again, even if this player was here before.
-        // Steam reuses already downloaded files; we do not assume they still exist.
+        // Ask Steam to check the files again on a later visit.
         if (session.Active || now - session.LastActivity > 120)
         {
             session.Downloaded.Clear();
             session.Pending = null;
             session.Active = false;
         }
-        // Retransmissions are normal while the Workshop popup is open. The loader
-        // disconnects just this connection on expiry instead of throwing globally.
+        // Repeated replies are normal while the Workshop popup is open.
         session.LastActivity = now;
         session.Pending = required.FirstOrDefault(id => !session.Downloaded.Contains(id));
-        // Never advertise two undownloaded addons: the CS2 client handles one at a time.
+        // CS2 downloads one missing addon at a time.
         return string.Join(',', required.Where(id => session.Downloaded.Contains(id) || id == session.Pending));
     }
 
@@ -114,10 +108,10 @@ internal sealed class AddonHandshake
     {
         if (!_sessions.TryGetValue(steamId, out var session)) return;
         if (session.Active) _sessions.Remove(steamId);
-        else session.LastActivity = now; // Keep progress across the download/reconnect handshake.
+        else session.LastActivity = now; // Keep download progress for the reconnect.
     }
 
-    // Between a connection reply (or CHANGELEVEL) and player_connect_full.
+    // Downloads are in progress until player_connect_full.
     public bool InProgress(double now, double window)
     {
         foreach (var session in _sessions.Values)
@@ -138,18 +132,20 @@ internal sealed class AddonHandshake
     private sealed record SavedSession(ulong SteamId, string[] Downloaded, string? Pending,
         double LastActivity, bool Active);
     private sealed record ReloadState(int Version, double SavedAt, SavedSession[] Sessions,
-        Dictionary<int, ulong> Slots, ConnectionDeadlines.Waiting[] Waiting);
+        Dictionary<int, ulong> Slots, ConnectionDeadlines.Waiting[] Waiting, double? MapChangeStarted = null);
 
-    public string ExportReload(Dictionary<int, ulong> slots, double now, ConnectionDeadlines? deadlines = null)
+    public string ExportReload(Dictionary<int, ulong> slots, double now, ConnectionDeadlines? deadlines = null,
+        SendHookSchedule? sendSchedule = null)
     {
         Prune(now);
         var sessions = _sessions.Select(pair => new SavedSession(pair.Key, pair.Value.Downloaded.ToArray(),
             pair.Value.Pending, pair.Value.LastActivity, pair.Value.Active)).ToArray();
         return JsonSerializer.Serialize(new ReloadState(2, now, sessions, slots,
-            deadlines?.Snapshot() ?? Array.Empty<ConnectionDeadlines.Waiting>()));
+            deadlines?.Snapshot() ?? Array.Empty<ConnectionDeadlines.Waiting>(), sendSchedule?.MapChangeStarted));
     }
 
-    public Dictionary<int, ulong> ImportReload(string json, double now, ConnectionDeadlines? deadlines = null)
+    public Dictionary<int, ulong> ImportReload(string json, double now, ConnectionDeadlines? deadlines = null,
+        SendHookSchedule? sendSchedule = null)
     {
         if (json.Length > 256_000) throw new InvalidOperationException("Workshop reload state exceeds its size limit.");
         var state = JsonSerializer.Deserialize<ReloadState>(json);
@@ -157,6 +153,8 @@ internal sealed class AddonHandshake
             state.Sessions.Length > MaxSessions || state.Slots.Count > MaxSessions ||
             !double.IsFinite(state.SavedAt) || now < state.SavedAt || now - state.SavedAt > 120)
             throw new InvalidOperationException("Workshop reload state is unsupported or expired.");
+        if (state.MapChangeStarted is { } started && (!double.IsFinite(started) || started > state.SavedAt))
+            throw new InvalidOperationException("Workshop reload state contains an invalid map-change time.");
         var restored = new Dictionary<ulong, Session>();
         foreach (var saved in state.Sessions)
         {
@@ -180,7 +178,8 @@ internal sealed class AddonHandshake
             bindings.Add(pair.Key, pair.Value);
         }
         (deadlines ?? new ConnectionDeadlines()).Restore(state.Waiting, bindings, now);
-        // Commit only after the complete snapshot has been validated.
+        // Apply the snapshot only after all validation passes.
+        sendSchedule?.RestoreMapChange(state.MapChangeStarted, now);
         _sessions.Clear();
         foreach (var pair in restored) _sessions.Add(pair.Key, pair.Value);
         return bindings;

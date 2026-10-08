@@ -1,6 +1,7 @@
 using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Core.Attributes;
+using CounterStrikeSharp.API.Modules.Extensions;
 using CounterStrikeSharp.API.Modules.Timers;
 using Microsoft.Extensions.Logging;
 using CS2FaceitLevels.Workshop;
@@ -12,7 +13,7 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
 {
     public override string ModuleName => "CS2FaceitLevels";
     public override string ModuleAuthor => "✪ Stαr";
-    public override string ModuleVersion => "1.1.1";
+    public override string ModuleVersion => "1.1.2";
     public override string ModuleDescription => "Shows real FACEIT levels in the CS2 scoreboard.";
 
     private readonly PlayerSessions _sessions = new();
@@ -29,11 +30,23 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
     private WorkshopLoader? _workshop;
     private bool _ownsMamBadge;
     private bool _mamRegistrationPending;
+    private bool _workshopCanStart, _signaturesUpdated;
 
     public CS2FaceitLevelsConfig Config { get; set; } = new();
 
     public void OnConfigParsed(CS2FaceitLevelsConfig config)
     {
+        if (config.Version < 2)
+        {
+            config.Version = 2;
+            try
+            {
+                var path = config.GetConfigPath();
+                if (Path.GetExtension(path) != ".json" || !File.Exists(Path.ChangeExtension(path, ".toml")))
+                    config.Update();
+            }
+            catch (Exception) { }
+        }
         config.CacheMinutes = Math.Clamp(config.CacheMinutes, 1, 1440);
         config.RequestTimeoutSeconds = Math.Clamp(config.RequestTimeoutSeconds, 2, 60);
         if (string.IsNullOrWhiteSpace(config.Language)) config.Language = "en";
@@ -54,6 +67,8 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
         _ownsMamBadge = WorkshopReloadBridge.TakeMamOwnership(ModuleDirectory, hotReload);
         _workshop = new WorkshopLoader(ModuleDirectory, Logger, () => Config.Debug);
         _workshop.RestoreReload(workshopReloadState);
+        _workshopCanStart = hotReload;
+        if (Config.AutoUpdateSignatures) _work.Run(UpdateSignatures);
 
         RegisterEventHandler<EventPlayerConnectFull>(OnPlayerConnectFull);
         RegisterEventHandler<EventPlayerSpawn>(OnPlayerSpawn);
@@ -81,8 +96,7 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
                         _workshop?.ClientActive(player.Slot, steamId);
                 }
         }
-        // Preserve the original first-player reload required by pin protection.
-        // Workshop handshakes are handed to the new instance during hot reload.
+        // Keep the first-player reload and pass its Workshop state to the next instance.
         _reloadOnFirstConnect = !hotReload;
         AddTimer(60f, _cache.RequestMaintenance, TimerFlags.REPEAT);
         if (_workshop != null)
@@ -94,8 +108,7 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
         {
             AddCommand("css_elo", "Show a player's FACEIT elo.", _commands.Single);
             AddCommand("css_elos", "Show every player's FACEIT elo.", _commands.All);
-            // Compile the two chat command paths off-thread, without accessing players
-            // or sending requests to FACEIT during startup or the first-player reload.
+            // Warm up chat formatting without player access or FACEIT requests.
             _work.Run(() =>
             {
                 _commands.Prewarm(_chat);
@@ -103,32 +116,49 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
             });
         }
         AddTimer(2f, () => RefreshAll(force: hotReload), TimerFlags.STOP_ON_MAPCHANGE);
-        // On hot reload the network message system is already initialized. Reattach
-        // before returning from Load so concurrent connections have no frame-long gap.
+        // Reattach immediately on hot reload so connecting players keep their handshake.
         if (hotReload) StartWorkshop();
     }
 
     public override void OnAllPluginsLoaded(bool hotReload)
     {
-        // The first connection can arrive before a queued world update runs.
-        // Attach the loader as soon as CSS has finished loading plugins.
+        // Network messages are ready once all plugins have loaded.
+        _workshopCanStart = true;
         StartWorkshop();
+    }
+
+    private async Task UpdateSignatures()
+    {
+        try
+        {
+            if (!await SignatureUpdater.Update(ModuleDirectory, _work.LifetimeToken).ConfigureAwait(false) ||
+                _work.Stopping) return;
+            Server.NextWorldUpdate(() =>
+            {
+                if (Stopping) return;
+                _signaturesUpdated = true;
+                if (_workshopCanStart) StartWorkshop();
+            });
+        }
+        catch (Exception) { }
     }
 
     private void StartWorkshop()
     {
-        if (_unloading || _workshop == null) return;
+        if (_unloading || !_workshopCanStart || _workshop == null) return;
         if (WorkshopLoader.OtherLoaderPresent() && !WorkshopLoader.MamHasBadge())
         {
             if (_mamRegistrationPending) return;
-            // Let MAM own the complete download and reconnect sequence when it is
-            // installed. This changes MAM's in-memory client list, not its cfg file.
+            // Register the badge in MAM's client list.
             _mamRegistrationPending = true;
             Server.ExecuteCommand($"mm_add_client_addon {WorkshopLoader.AddonId}");
             ConfirmMamRegistration(0);
             return;
         }
-        _workshop.Start();
+        bool updated = _signaturesUpdated;
+        _signaturesUpdated = false;
+        if (updated && _workshop.CanRetryStartup) _workshop.RetryStartup();
+        else _workshop.Start();
     }
 
     private void ConfirmMamRegistration(int attempt)
@@ -142,8 +172,7 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
         }
         else if (attempt < 4)
         {
-            // Server commands may run after the current plugin callback. A pre-world
-            // update also runs on hibernating servers before their first player joins.
+            // Commands may finish later; world updates also run during hibernation.
             Server.NextWorldUpdate(() => ConfirmMamRegistration(attempt + 1));
         }
         else
@@ -175,7 +204,7 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
         {
             Logger.LogWarning(ex, "[CS2FaceitLevels] Background shutdown failed.");
         }
-        // Observe late completion too; no task in this drain depends on a frame callback.
+        // Observe shutdown work that finishes after the timeout.
         _ = shutdown.ContinueWith(task =>
         {
             if (task.IsFaulted && Config.Debug)
@@ -229,8 +258,7 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
         {
             if (Stopping || !_sessions.IsPendingPut(slot, version)) return;
             var player = Utilities.GetPlayerFromSlot(slot);
-            // The player may not report "connected" on this frame yet. Arm protection anyway:
-            // PinEnforcer itself waits until the player is connected with an inventory.
+            // Arm protection now; PinEnforcer waits for the player's inventory.
             if (PlayerAccess.TryIdentity(player, out var steamId))
                 _sessions.GetOrAdd(slot, steamId).EnforcePin = true;
         });
@@ -253,12 +281,11 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
         if (!Stopping && PlayerAccess.TryIdentity(player, out var steamId))
         {
             var session = _sessions.GetOrAdd(player.Slot, steamId);
-            // In-game events re-arm pin protection, so it never depends on the timing of
-            // OnClientPutInServer or the first-player reload (Workshop downloads, reconnects).
+            // Re-arm pin protection after a spawn or connection.
             session.EnforcePin = true;
             session.InventoryRetryAttempts = 0;
             var map = _mapGeneration;
-            // Preserve the short spawn/connect delay; missing inventories get bounded retries.
+            // Give the inventory time to load before refreshing.
             AddTimer(delay, () =>
             {
                 if (map == _mapGeneration) RefreshSlot(session, force: false);
@@ -293,8 +320,7 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
             _pins.Apply(session, player, cached);
             return;
         }
-        // Pending refreshes already perform a fresh lookup. Keep one completion
-        // per session; delayed events still reapply cached results when needed.
+        // Keep one lookup pending per session.
         if (session.RefreshPending) return;
         session.RefreshPending = true;
         var request = ++session.RefreshRequest;

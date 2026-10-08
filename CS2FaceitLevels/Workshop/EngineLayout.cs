@@ -5,6 +5,10 @@ namespace CS2FaceitLevels.Workshop;
 
 internal sealed class EngineLayout
 {
+    private string _sourceJson = "";
+    private static string RuntimeKey(string directory) =>
+        "CS2FaceitLevels.Workshop.RuntimeGamedata:" + Path.GetFullPath(directory);
+
     [JsonIgnore]
     public string Platform { get; set; } = "";
     [JsonRequired]
@@ -51,9 +55,15 @@ internal sealed class EngineLayout
         if ((!OperatingSystem.IsLinux() && !OperatingSystem.IsWindows()) || System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture !=
             System.Runtime.InteropServices.Architecture.X64)
             throw new PlatformNotSupportedException("The Workshop loader requires Linux x64 or Windows x64.");
-        return Parse(File.ReadAllText(Path.Combine(directory, "workshop.gamedata.json")),
+        // Keep the loaded layout across reloads; CSS caches hooks by signature text.
+        var json = AppDomain.CurrentDomain.GetData(RuntimeKey(directory)) as string ??
+            File.ReadAllText(Path.Combine(directory, "workshop.gamedata.json"));
+        return Parse(json,
             OperatingSystem.IsWindows() ? "windows" : "linux");
     }
+
+    internal void Remember(string directory) =>
+        AppDomain.CurrentDomain.SetData(RuntimeKey(directory), _sourceJson);
 
     internal static EngineLayout Parse(string json, string platform)
     {
@@ -80,12 +90,18 @@ internal sealed class EngineLayout
             data.GetClientXuidIndex is < 1 or > 200 || data.GetAppIdIndex is < 1 or > 200)
             throw new InvalidOperationException("Unsupported Workshop gamedata layout. Replace workshop.gamedata.json together with the plugin DLL.");
         data.Platform = platform;
+        data._sourceJson = json;
         return data;
     }
 
     private static bool ValidOffset(int offset) => offset is >= 0 and <= 4096 && offset % 4 == 0;
-    private static bool ValidSignature(string value) => !string.IsNullOrWhiteSpace(value) &&
-        value.Split(' ', StringSplitOptions.RemoveEmptyEntries).All(token => token is "?" or "??" ||
+    private static bool ValidSignature(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return false;
+        var tokens = value.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        return tokens.Any(token => token is not ("?" or "??")) &&
+            tokens.All(token => token is "?" or "??" ||
             (token.Length == 2 && byte.TryParse(token, System.Globalization.NumberStyles.HexNumber,
                 System.Globalization.CultureInfo.InvariantCulture, out _)));
+    }
 }

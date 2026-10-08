@@ -14,8 +14,7 @@ internal sealed class EloCommands(PlayerSessions sessions, FaceitLookup lookup, 
     private const long CooldownMs = 10_000;
     private const int MaxLines = 32;
 
-    // Preparing methods compiles their managed code without calling game natives.
-    // The sample below also initializes the formatting paths used by both commands.
+    // Warm up the commands and formatting without calling game natives.
     internal void Prewarm(ChatFormatter chat)
     {
         const BindingFlags instance = BindingFlags.Instance | BindingFlags.NonPublic;
@@ -96,7 +95,7 @@ internal sealed class EloCommands(PlayerSessions sessions, FaceitLookup lookup, 
         }
         var session = sessions.GetOrAdd(caller.Slot, callerId);
         if (!CanUse(session)) return;
-        // Capture native fields once, then filter/sort only managed values.
+        // Copy player data before starting background work.
         var targets = SnapshotPlayers(includeTeam: true).OrderBy(p => p.Team).ThenBy(p => p.Name)
             .Take(MaxLines).ToArray();
         session.CommandPending = true;

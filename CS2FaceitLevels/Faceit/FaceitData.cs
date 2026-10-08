@@ -2,7 +2,7 @@ using System.Text.Json;
 
 namespace CS2FaceitLevels;
 
-// -1 is a temporary lookup failure; 0 means no FACEIT account; 11 is Challenger.
+// Levels: -1 = lookup failed, 0 = no FACEIT account, 11 = Challenger.
 internal sealed record FaceitData(int Level, int? Elo, DateTime ExpiresAt)
 {
     internal int SkillLevel => Level <= 0 ? 0 : Math.Min(Level, 10);

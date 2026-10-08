@@ -5,6 +5,8 @@ namespace CS2FaceitLevels;
 
 public sealed class CS2FaceitLevelsConfig : BasePluginConfig
 {
+    public CS2FaceitLevelsConfig() => Version = 2;
+
     [JsonPropertyName("faceit_api_key")]
     public string FaceitApiKey { get; set; } = "PUT_YOUR_FACEIT_API_KEY_HERE";
 
@@ -25,6 +27,9 @@ public sealed class CS2FaceitLevelsConfig : BasePluginConfig
 
     [JsonPropertyName("enable_elo_commands")]
     public bool EnableEloCommands { get; set; } = true;
+
+    [JsonPropertyName("AutoUpdateSignatures")]
+    public bool AutoUpdateSignatures { get; set; } = true;
 }
 
 public sealed class CS2FaceitLevelsLang

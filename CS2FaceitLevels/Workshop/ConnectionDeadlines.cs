@@ -1,7 +1,6 @@
 namespace CS2FaceitLevels.Workshop;
 
-// Only unfinished Workshop handshakes are tracked. Retransmissions do not extend
-// the deadline. All state is owned by the game thread, including timer callbacks.
+// Game-thread state. Repeated replies do not extend a connection's deadline.
 internal sealed class ConnectionDeadlines
 {
     public const double TimeoutSeconds = 30;
@@ -26,8 +25,7 @@ internal sealed class ConnectionDeadlines
 
     public bool TakeExpired(Waiting pending, ulong currentSteamId, double now)
     {
-        // A callback may run after a disconnect/reconnect or after this slot was
-        // reused. Never disconnect a replacement connection using an old deadline.
+        // An old deadline must not disconnect a new player in the same slot.
         if (!_waiting.TryGetValue(pending.Slot, out var current) ||
             !ReferenceEquals(current, pending) || now - current.Started < TimeoutSeconds)
             return false;

@@ -1,8 +1,6 @@
 namespace CS2FaceitLevels.Workshop;
 
-// AppDomain data holds only a CoreLib string, never an object from the unloadable
-// plugin assembly. This survives CSS's assembly reload without retaining old hooks.
-// It is process-local and consumed once; no per-connection disk I/O is needed.
+// Save strings in AppDomain so reload state survives without keeping the old assembly alive.
 internal static class WorkshopReloadBridge
 {
     private static string Key(string directory) => "CS2FaceitLevels.Workshop.Reload:" + Path.GetFullPath(directory);

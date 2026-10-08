@@ -5,8 +5,7 @@ using Microsoft.Extensions.Logging;
 
 namespace CS2FaceitLevels;
 
-// The game thread only performs TryGetFresh and requests maintenance.
-// Disk I/O, JSON and eviction run on owned background jobs.
+// The game thread reads cached values; loading, saving and cleanup run in the background.
 internal sealed class FaceitCache
 {
     private const int MaxEntries = 10_000;
@@ -55,9 +54,7 @@ internal sealed class FaceitCache
         }
     }
 
-    // Called only under _dataGate, on a worker. All cache writes use this gate.
-    // One pass removes expired entries and finds the oldest survivor. Each store
-    // adds at most one entry, so overflow needs at most one further removal.
+    // Runs under _dataGate on a worker. A store can exceed the limit by one entry.
     private void Compact()
     {
         var now = DateTime.UtcNow;
@@ -77,7 +74,7 @@ internal sealed class FaceitCache
 
     private void Remove(KeyValuePair<ulong, FaceitData> entry)
     {
-        // Conditional removal cannot evict a different, newly refreshed value.
+        // Remove only this value, so a newer result stays cached.
         if (_entries.TryRemove(entry) && entry.Value.Level >= 0) _version++;
     }
 
@@ -127,7 +124,7 @@ internal sealed class FaceitCache
             lock (_dataGate)
             {
                 if (!_acceptWrites) return;
-                // Lookups await Ready, so loading cannot overwrite an HTTP result.
+                // Lookups wait for Ready before storing HTTP results.
                 foreach (var e in valid) _entries[e.SteamId] = new FaceitData(e.Level, e.Elo, e.ExpiresAt);
                 if (valid.Count != entries.Count || _entries.Count != valid.Count) _version++;
             }
@@ -172,7 +169,7 @@ internal sealed class FaceitCache
         catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
         catch (Exception ex)
         {
-            // Do not acknowledge this version: the next maintenance/save retries it.
+            // Leave this version unsaved so the next pass retries it.
             if (_debug())
                 _logger.LogWarning(ex, "[CS2FaceitLevels] Failed to write cache file {Path}.", _path);
         }
@@ -200,8 +197,7 @@ internal sealed class FaceitCache
         try
         {
             await drain.WaitAsync(_ioStop.Token).ConfigureAwait(false);
-            // A clean unload saves changes accepted before cancellation, even if
-            // the 60-second maintenance timer has not fired yet.
+            // Save any changes made since the last maintenance pass.
             await Flush(_ioStop.Token).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (_ioStop.IsCancellationRequested)
@@ -216,6 +212,6 @@ internal sealed class FaceitCache
         }
     }
 
-    // Keep cache.json field names, supported levels and UTC expiry semantics.
+    // Matches the existing cache.json format; expiry times are UTC.
     private sealed record PersistentEntry(ulong SteamId, int Level, int? Elo, DateTime ExpiresAt);
 }

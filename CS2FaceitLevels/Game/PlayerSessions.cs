@@ -22,8 +22,7 @@ internal sealed class PlayerSession(int slot, ulong steamId, long generation, in
     internal bool CommandPending;
 }
 
-// Main-thread collection: compact iteration and no dictionary lookup per tick.
-// Workers receive a session identity and read Active, never game entity handles.
+// Updated on the game thread. Workers read session identity and Active, never game handles.
 internal sealed class PlayerSessions
 {
     private readonly Dictionary<int, PlayerSession> _bySlot = new();

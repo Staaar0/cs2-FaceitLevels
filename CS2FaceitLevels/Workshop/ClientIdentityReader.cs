@@ -2,8 +2,7 @@ using System.Runtime.InteropServices;
 
 namespace CS2FaceitLevels.Workshop;
 
-// Only slot/server fields use native layout data. The identity comes from the
-// engine's GetClientXUID getter, never from a calculated CSteamID field offset.
+// Read slot/server offsets from gamedata; get the Steam ID through GetClientXUID.
 internal static class ClientIdentityReader
 {
     public static (ulong SteamId, int Slot) Read(nint client, nint server, EngineLayout layout,
@@ -16,9 +15,9 @@ internal static class ClientIdentityReader
         if (slot is < 0 or >= 256)
             throw new InvalidOperationException($"Client slot {slot} is invalid at Workshop gamedata offset {layout.ClientSlotOffset}.");
         ulong steamId = getClientXuid(slot);
-        // The engine returns zero when there is no connected account for this slot.
+        // Zero means this slot has no connected account yet.
         if (steamId == 0) return (0, slot);
-        // Public-universe individual Steam account, desktop instance, nonzero account number.
+        // Accept a public desktop Steam account with a nonzero account number.
         if ((steamId >> 32) != 0x01100001UL || (uint)steamId == 0)
             throw new InvalidOperationException($"Engine GetClientXUID returned an invalid Steam ID format for slot {slot}.");
         return (steamId, slot);

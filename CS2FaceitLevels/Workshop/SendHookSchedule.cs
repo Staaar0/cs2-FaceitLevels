@@ -1,20 +1,18 @@
 namespace CS2FaceitLevels.Workshop;
 
-// Pure timing state for the SendNetMessage hook. The engine calls that function for
-// every message to every client, but the loader only acts on SignonState, which is
-// sent while a client signs on or the server changes map. The hook is attached for
-// those windows and released afterwards. Game thread only; no game natives.
+// Game-thread timing for a hook used only during connections and map changes.
 internal sealed class SendHookSchedule
 {
-    // After the last reply, ClientConnect, SignonState or map start.
+    // Keep the hook briefly after connection or map activity.
     public const double IdleSeconds = 30;
-    // An unfinished handshake with recent activity keeps the hook (see AddonHandshake).
+    // Keep the hook while a recent download is unfinished.
     public const double HandshakeSeconds = 120;
-    // A host-state request precedes CHANGELEVEL, possibly by a Workshop map download.
+    // Allow time for a Workshop map download before CHANGELEVEL.
     public const double MapChangeSeconds = 600;
 
     private double _neededUntil;
     private double? _mapChangeStarted;
+    public double? MapChangeStarted => _mapChangeStarted;
 
     public void Activity(double now) => _neededUntil = Math.Max(_neededUntil, now + IdleSeconds);
 
@@ -30,13 +28,18 @@ internal sealed class SendHookSchedule
         Activity(now);
     }
 
+    public void RestoreMapChange(double? started, double now)
+    {
+        _mapChangeStarted = started is { } value && now - value < MapChangeSeconds ? value : null;
+    }
+
     public bool CanRelease(double now, int waitingDeadlines, AddonHandshake handshakes)
     {
         if (now < _neededUntil || waitingDeadlines != 0) return false;
         if (_mapChangeStarted is { } started)
         {
             if (now - started < MapChangeSeconds) return false;
-            _mapChangeStarted = null; // A request that never reached a map start.
+            _mapChangeStarted = null; // The map-change request timed out.
         }
         return !handshakes.InProgress(now, HandshakeSeconds);
     }

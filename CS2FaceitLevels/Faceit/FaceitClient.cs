@@ -7,7 +7,7 @@ using Microsoft.Extensions.Logging;
 
 namespace CS2FaceitLevels;
 
-// HTTP-only: never reads game entities or schedules game-native work.
+// Handles HTTP only; game entities stay on the game thread.
 internal sealed class FaceitClient(Func<CS2FaceitLevelsConfig> getConfig, ILogger logger)
 {
     private CS2FaceitLevelsConfig Config => getConfig();
@@ -20,15 +20,16 @@ internal sealed class FaceitClient(Func<CS2FaceitLevelsConfig> getConfig, ILogge
     private static readonly HttpClient Http = new() { MaxResponseContentBufferSize = MaxResponseBytes };
     private static readonly SemaphoreSlim HttpSlots = new(4, 4);
     private long _requestBlockedUntilTicks;
+    private int _missingApiKeyWarningLogged;
 
     internal async Task<FaceitData> Fetch(ulong steamId, CancellationToken token)
     {
         if (string.IsNullOrWhiteSpace(Config.FaceitApiKey) || Config.FaceitApiKey == DefaultApiKey)
         {
-            if (Config.Debug)
-                Logger.LogWarning("[CS2FaceitLevels] No FACEIT API key set in the config.");
+            if (Interlocked.Exchange(ref _missingApiKeyWarningLogged, 1) == 0)
+                Logger.LogWarning("[CS2FaceitLevels] Set faceit_api_key in the plugin config to enable FACEIT lookups.");
 
-            return NoFaceit();
+            return FaceitData.RequestFailed;
         }
 
         var player = await GetJson<FaceitPlayer>(
@@ -40,12 +41,20 @@ internal sealed class FaceitClient(Func<CS2FaceitLevelsConfig> getConfig, ILogge
 
         var level = cs2.SkillLevel.Value;
 
-        if (level == 10 && !string.IsNullOrEmpty(player!.PlayerId) && !string.IsNullOrEmpty(cs2.Region)
-            && await IsChallenger(player.PlayerId!, cs2.Region!, token))
+        if (level == 10 && !string.IsNullOrEmpty(player!.PlayerId) && !string.IsNullOrEmpty(cs2.Region))
         {
-            level = 11;
+            try
+            {
+                if (await IsChallenger(player.PlayerId!, cs2.Region!, token))
+                    level = 11;
+            }
+            catch (FaceitApiException) when (!token.IsCancellationRequested)
+            {
+                // Keep the player result if the optional ranking request fails.
+            }
         }
 
+        token.ThrowIfCancellationRequested();
         return new FaceitData(level, cs2.Elo, DateTime.UtcNow.AddMinutes(CacheMinutes()));
     }
 
@@ -191,7 +200,7 @@ internal sealed class FaceitClient(Func<CS2FaceitLevelsConfig> getConfig, ILogge
             {
                 if (length == MaxResponseBytes)
                 {
-                    // Probe EOF without allocating or accepting a byte past the limit.
+                    // Check for extra data once the size limit is reached.
                     if (await stream.ReadAsync(buffer.AsMemory(0, 1), token) != 0)
                         throw new FaceitApiException("FACEIT API response exceeded the size limit.");
                     break;
