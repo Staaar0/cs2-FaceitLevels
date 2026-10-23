@@ -14,9 +14,6 @@ namespace CS2FaceitLevels.Workshop;
 
 internal sealed class WorkshopLoader : IDisposable
 {
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    private delegate void SetUtlStringDirect(nint value, nint utf8, int length);
-
     public const string AddonId = "3724637448";
     private readonly string _directory;
     private readonly ILogger _log;
@@ -37,8 +34,6 @@ internal sealed class WorkshopLoader : IDisposable
     private EngineLayout _layout = null!;
     private nint _replyFunction, _sendFunction, _fillServerInfoFunction, _hostRequestFunction, _signonVTable, _serverInfoVTable;
     private nint _engineSignonVTable, _engineServerInfoVTable;
-    private nint _tier0Module;
-    private SetUtlStringDirect? _setUtlString;
     private nint _engineInterface, _getXuidFunction;
     private UserMessage? _message, _serverInfo;
     private bool _replyHooked, _sendHooked, _fillServerInfoHooked, _hostRequestHooked, _insideReply, _insideMessage;
@@ -71,10 +66,15 @@ internal sealed class WorkshopLoader : IDisposable
 
     public void Start()
     {
-        if (_disposed || _faulted) return;
-        if (MamHasBadge())
+        if (_disposed) return;
+        if (OtherLoaderPresent())
         {
-            if (_replyHooked) Detach();
+            if (_replyHooked || _sendHooked || _fillServerInfoHooked || _hostRequestHooked) Detach();
+            if (!MamHasBadge())
+            {
+                Status = "Waiting for MultiAddonManager badge registration";
+                return;
+            }
             if (Status != "Managed by MultiAddonManager")
             {
                 Status = "Managed by MultiAddonManager";
@@ -82,6 +82,7 @@ internal sealed class WorkshopLoader : IDisposable
             }
             return;
         }
+        if (_faulted) return;
         if (_replyHooked) return;
         try
         {
@@ -150,19 +151,6 @@ internal sealed class WorkshopLoader : IDisposable
                 _layout.HostStateRequestSignature, engine).Handle;
             if (_hostRequestFunction == nint.Zero)
                 throw new InvalidOperationException("Host-state request hook was not found.");
-            var libraryName = OperatingSystem.IsWindows() ? "tier0.dll" : "libtier0.so";
-            var engineDirectory = Path.GetDirectoryName(engine);
-            var tier0 = string.IsNullOrEmpty(engineDirectory)
-                ? libraryName : Path.Combine(engineDirectory, libraryName);
-            var setDirectSymbol = OperatingSystem.IsWindows()
-                ? "?SetDirect@CUtlString@@QEAAXPEBDH@Z" : "_ZN10CUtlString9SetDirectEPKci";
-            if (!NativeLibrary.TryLoad(tier0, out _tier0Module) &&
-                !NativeLibrary.TryLoad(libraryName, out _tier0Module))
-                throw new InvalidOperationException("Engine string library is unavailable.");
-            if (!NativeLibrary.TryGetExport(_tier0Module, setDirectSymbol, out var setDirect))
-                throw new InvalidOperationException("Engine string setter is unavailable.");
-            _setUtlString = Marshal.GetDelegateForFunctionPointer<SetUtlStringDirect>(setDirect);
-
             _fillServerInfoReference = FunctionReference.Create(_fillServerInfoHandler);
             NativeAPI.HookFunction(_fillServerInfoFunction, _fillServerInfoHandler, true);
             _fillServerInfoHooked = true;
@@ -328,19 +316,7 @@ internal sealed class WorkshopLoader : IDisposable
 
             _sendSchedule.MapChangeRequested(Now);
             NeedSendHook();
-            if (OtherLoaderPresent()) return HookResult.Continue;
-            var original = ReadAddons(request, _layout.HostStateRequestAddonsOffset);
-            var required = string.Join(',', AddonHandshake.Required(original, AddonId));
-            if (original == required) return HookResult.Continue;
-            nint utf8 = Marshal.StringToCoTaskMemUTF8(required);
-            try
-            {
-                _setUtlString!(request + _layout.HostStateRequestAddonsOffset, utf8,
-                    Encoding.UTF8.GetByteCount(required));
-            }
-            finally { Marshal.FreeCoTaskMem(utf8); }
             ++_mapRequests;
-            if (_debug()) _log.LogInformation("[CS2FaceitLevels] Workshop map request: {Addons}", required);
         }
         catch (Exception ex) { Fault(ex); }
         return HookResult.Continue;
@@ -669,12 +645,6 @@ internal sealed class WorkshopLoader : IDisposable
         if (_hostRequestReference != null) FunctionReference.Remove(_hostRequestReference.Identifier);
         _replyReference = _sendReference = _fillServerInfoReference = _hostRequestReference = null;
         _sendSchedule.Clear();
-        _setUtlString = null;
-        if (_tier0Module != nint.Zero)
-        {
-            NativeLibrary.Free(_tier0Module);
-            _tier0Module = nint.Zero;
-        }
         _message?.Dispose();
         _message = null;
         _serverInfo?.Dispose();

@@ -1,26 +1,13 @@
 # CS2FaceitLevels 
 
-CS2 plugin that shows a player's real FACEIT level in the CS2 scoreboard.
-
-From 1 to Challenger badge
-
-The plugin does this:
-
-1. Reads the player's SteamID64 after authorization.
-2. Requests the player's FACEIT CS2 skill level from the FACEIT Data API.
-3. Writes the mapped pin ID to the scoreboard pin slot.
-4. workshop addon replaces those pin images with FACEIT level images.
+CS2 plugin that shows a player's real FACEIT level in the scoreboard.
 
 ## Requirements
 
 - [CounterStrikeSharp](https://github.com/roflmuffin/CounterStrikeSharp)
 - [Faceit API Key](https://developers.faceit.com/)
 
-## ELO Chat Commands
-
-Players can privately check FACEIT ELO using chat commands.
-
-### Commands
+## Commands
 
 - elo/elos commands can be disabled via config
 
@@ -40,17 +27,12 @@ Edit this file and add your FACEIT API key:
 counterstrikesharp/configs/plugins/CS2FaceitLevels/CS2FaceitLevels.json.
 ```
 
-Supported languages:
+### languages:
 
 ```text
 ar, en, lv, pl, pt-BR, pt-PT, ru, tr, ua, zh-ch
 ```
-
-Default language:
-
-```json
-"language": "en"
-```
+Default: `en`
 
 ## Default Config
 ```json

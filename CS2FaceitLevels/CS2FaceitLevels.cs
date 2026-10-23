@@ -30,6 +30,7 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
     private WorkshopLoader? _workshop;
     private bool _ownsMamBadge;
     private bool _mamRegistrationPending;
+    private long _mamRegistrationGeneration;
     private bool _workshopCanStart, _signaturesUpdated;
 
     public CS2FaceitLevelsConfig Config { get; set; } = new();
@@ -83,7 +84,9 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
         });
         AddCommand("css_faceit_workshop_status", "Show the Workshop loader status (server console).", (player, command) =>
         {
-            if (player == null) command.ReplyToCommand(_workshop?.Summary ?? "Workshop loader has not started.");
+            if (player != null) return;
+            if (!Stopping && WorkshopLoader.OtherLoaderPresent()) _workshop?.Start();
+            command.ReplyToCommand(_workshop?.Summary ?? "Workshop loader has not started.");
         });
 
         if (hotReload)
@@ -98,7 +101,7 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
         }
         _reloadOnFirstConnect = !hotReload;
         AddTimer(60f, _cache.RequestMaintenance, TimerFlags.REPEAT);
-        if (_workshop != null) AddTimer(30f, _workshop.Maintenance, TimerFlags.REPEAT);
+        if (_workshop != null) AddTimer(30f, MaintainWorkshop, TimerFlags.REPEAT);
         if (Config.EnableEloCommands)
         {
             AddCommand("css_elo", "Show a player's FACEIT elo.", _commands.Single);
@@ -138,13 +141,28 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
     private void StartWorkshop()
     {
         if (_unloading || !_workshopCanStart || _workshop == null) return;
-        if (WorkshopLoader.OtherLoaderPresent() && !WorkshopLoader.MamHasBadge())
+        if (WorkshopLoader.OtherLoaderPresent())
         {
+            _workshop.Start();
+            if (WorkshopLoader.MamHasBadge())
+            {
+                if (_mamRegistrationPending)
+                {
+                    _ownsMamBadge |= WorkshopLoader.MamHasClientBadge();
+                    _mamRegistrationPending = false;
+                    ++_mamRegistrationGeneration;
+                }
+                return;
+            }
             if (_mamRegistrationPending) return;
             _mamRegistrationPending = true;
-            Server.ExecuteCommand($"mm_add_client_addon {WorkshopLoader.AddonId}");
-            ConfirmMamRegistration(0);
+            ConfirmMamRegistration(++_mamRegistrationGeneration, 0);
             return;
+        }
+        if (_mamRegistrationPending)
+        {
+            _mamRegistrationPending = false;
+            ++_mamRegistrationGeneration;
         }
         bool updated = _signaturesUpdated;
         _signaturesUpdated = false;
@@ -152,30 +170,54 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
         else _workshop.Start();
     }
 
-    private void ConfirmMamRegistration(int attempt)
+    private void ConfirmMamRegistration(long generation, int attempt)
     {
-        if (_unloading || !_mamRegistrationPending) return;
-        if (WorkshopLoader.MamHasClientBadge())
+        if (Stopping || !_mamRegistrationPending || generation != _mamRegistrationGeneration) return;
+        if (!WorkshopLoader.OtherLoaderPresent())
         {
-            _ownsMamBadge = true;
             _mamRegistrationPending = false;
+            ++_mamRegistrationGeneration;
+            StartWorkshop();
+            return;
+        }
+        if (WorkshopLoader.MamHasBadge())
+        {
+            _ownsMamBadge |= WorkshopLoader.MamHasClientBadge();
+            _mamRegistrationPending = false;
+            ++_mamRegistrationGeneration;
             StartWorkshop();
         }
-        else if (attempt < 4)
+        else if (attempt < 30)
         {
-            Server.NextWorldUpdate(() => ConfirmMamRegistration(attempt + 1));
+            Server.ExecuteCommand($"mm_add_client_addon {WorkshopLoader.AddonId}");
+            _work.Run(async () =>
+            {
+                await Task.Delay(1000, _work.LifetimeToken).ConfigureAwait(false);
+                if (!_work.Stopping)
+                    Server.NextWorldUpdate(() => ConfirmMamRegistration(generation, attempt + 1));
+            });
         }
         else
         {
             _mamRegistrationPending = false;
-            Logger.LogError("[CS2FaceitLevels] MultiAddonManager did not register the badge addon. Check that mm_add_client_addon is available.");
+            ++_mamRegistrationGeneration;
+            Logger.LogError("[CS2FaceitLevels] The FACEIT badge is still missing from MAM after retrying registration for 30 seconds. Check the server response to mm_add_client_addon {Addon}. The built-in loader remains inactive while MAM is installed.", WorkshopLoader.AddonId);
         }
+    }
+
+    private void MaintainWorkshop()
+    {
+        if (Stopping) return;
+        _workshop?.Maintenance();
+        if (WorkshopLoader.OtherLoaderPresent()) StartWorkshop();
     }
 
     public override void Unload(bool hotReload)
     {
         if (_unloading) return;
         _unloading = true;
+        _mamRegistrationPending = false;
+        ++_mamRegistrationGeneration;
         _workshop?.PreserveReload(hotReload);
         _workshop?.Dispose();
         WorkshopReloadBridge.SaveMamOwnership(ModuleDirectory, hotReload && _ownsMamBadge);
@@ -205,6 +247,8 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
 
     private void OnMapStart(string mapName)
     {
+        _mamRegistrationPending = false;
+        ++_mamRegistrationGeneration;
         _workshop?.MapStarted();
         Server.NextWorldUpdate(StartWorkshop);
         _mapGeneration++;
