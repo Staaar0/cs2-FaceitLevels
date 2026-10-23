@@ -12,8 +12,6 @@ using Microsoft.Extensions.Logging;
 
 namespace CS2FaceitLevels.Workshop;
 
-// x64 bridge. No separate Metamod addon or helper DLL is loaded.
-// The protocol follows Source2ZE/MultiAddonManager (GPL-3.0); see README.md.
 internal sealed class WorkshopLoader : IDisposable
 {
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
@@ -44,6 +42,7 @@ internal sealed class WorkshopLoader : IDisposable
     private nint _engineInterface, _getXuidFunction;
     private UserMessage? _message, _serverInfo;
     private bool _replyHooked, _sendHooked, _fillServerInfoHooked, _hostRequestHooked, _insideReply, _insideMessage;
+    private bool _releaseQueued;
     private volatile bool _disposed;
     private volatile bool _faulted;
     private bool _started;
@@ -75,7 +74,6 @@ internal sealed class WorkshopLoader : IDisposable
         if (_disposed || _faulted) return;
         if (MamHasBadge())
         {
-            // MAM may load later. Stop our hooks once it takes over the badge.
             if (_replyHooked) Detach();
             if (Status != "Managed by MultiAddonManager")
             {
@@ -89,7 +87,6 @@ internal sealed class WorkshopLoader : IDisposable
         {
             _layout = EngineLayout.Read(_directory);
             var engine = Addresses.EnginePath;
-            // GetClientSteamID may be null this early; use the connection-time XUID API.
             _engineInterface = NativeAPI.GetValveInterface(0, _layout.EngineInterface);
             if (_engineInterface == nint.Zero) throw new InvalidOperationException("The engine server interface was not found.");
             var engineVTable = Marshal.ReadIntPtr(_engineInterface);
@@ -105,13 +102,11 @@ internal sealed class WorkshopLoader : IDisposable
             if (_getXuidFunction == nint.Zero) throw new InvalidOperationException("The engine GetClientXUID function could not be created.");
             var vtable = NativeAPI.FindVirtualTable(engine, _layout.ClientVTable);
             if (vtable == nint.Zero) throw new InvalidOperationException("CServerSideClient vtable was not found.");
-            // Check the gamedata signature against the client vtable.
             var sendServerInfo = NativeAPI.FindSignature(engine, _layout.SendServerInfoSignature);
             if (sendServerInfo == nint.Zero ||
                 Marshal.ReadIntPtr(vtable, _layout.SendServerInfoIndex * IntPtr.Size) != sendServerInfo)
                 throw new InvalidOperationException("Client vtable does not match the platform's SendServerInfo gamedata.");
 
-            // Wait for plugin/map initialization before looking up network messages.
             _message = UserMessage.FromPartialName("SignonState");
             var payload = Marshal.ReadIntPtr(_message.Handle, _layout.UserMessagePayloadOffset);
             if (payload == nint.Zero) throw new InvalidOperationException("SignonState payload is null.");
@@ -122,7 +117,6 @@ internal sealed class WorkshopLoader : IDisposable
             if (_message.ReadInt("signon_state") != 0 || _message.ReadString("addons") != "")
                 throw new InvalidOperationException("SignonState protobuf fields could not be verified.");
 
-            // ServerInfo must keep the badge in the final mount list too.
             _serverInfo = UserMessage.FromPartialName("ServerInfo");
             var infoPayload = Marshal.ReadIntPtr(_serverInfo.Handle, _layout.UserMessagePayloadOffset);
             if (infoPayload == nint.Zero) throw new InvalidOperationException("ServerInfo payload is null.");
@@ -133,20 +127,16 @@ internal sealed class WorkshopLoader : IDisposable
             if (_serverInfo.ReadString("addon_name") != "")
                 throw new InvalidOperationException("ServerInfo addon field could not be verified.");
 
-            // Factory and engine messages can use different vtables. Validate both forms.
             _engineSignonVTable = FindMessageVTable(engine, "CNETMsg_SignonState_t", _signonVTable, _serverInfoVTable);
             _engineServerInfoVTable = FindMessageVTable(engine, "CSVCMsg_ServerInfo_t", _serverInfoVTable, _signonVTable);
             if (_engineSignonVTable == _engineServerInfoVTable)
                 throw new InvalidOperationException("Engine SignonState and ServerInfo message vtables are identical.");
 
-            // CSS keeps the detour after unhooking. Use its cache instead of rescanning patched code.
             _replyFunction = new MemoryFunctionVoid<nint, nint>(
                 _layout.ReplyConnectionSignature, engine).Handle;
-            // The SDK uses an 8-bit buffer type, including BUF_DEFAULT = -1.
             _sendFunction = NativeAPI.CreateVirtualFunctionFromVTable(vtable, _layout.SendNetMessageIndex,
                 3, (int)DataType.DATA_TYPE_BOOL, new object[] { (int)DataType.DATA_TYPE_POINTER,
                 (int)DataType.DATA_TYPE_POINTER, (int)DataType.DATA_TYPE_CHAR });
-            // SendServerInfo bypasses SendNetMessage. Edit the list after FillServerInfo.
             var serverVTable = NativeAPI.FindVirtualTable(engine, _layout.ServerVTable);
             if (serverVTable == nint.Zero)
                 throw new InvalidOperationException("Network game server vtable was not found.");
@@ -156,7 +146,6 @@ internal sealed class WorkshopLoader : IDisposable
             if (_replyFunction == nint.Zero || _sendFunction == nint.Zero || _fillServerInfoFunction == nint.Zero)
                 throw new InvalidOperationException("CounterStrikeSharp could not create the Workshop native hooks.");
 
-            // The host-state request sets the next map's addons before OnMapStart.
             _hostRequestFunction = new MemoryFunctionVoid<nint, nint>(
                 _layout.HostStateRequestSignature, engine).Handle;
             if (_hostRequestFunction == nint.Zero)
@@ -181,19 +170,18 @@ internal sealed class WorkshopLoader : IDisposable
             NativeAPI.HookFunction(_sendFunction, _sendHandler, false);
             _sendHooked = true;
             ++_sendAttaches;
-            _sendSchedule.Activity(Now);
             _replyReference = FunctionReference.Create(_replyHandler);
             NativeAPI.HookFunction(_replyFunction, _replyHandler, false);
             _replyHooked = true;
             _hostRequestReference = FunctionReference.Create(_hostRequestHandler);
             NativeAPI.HookFunction(_hostRequestFunction, _hostRequestHandler, false);
             _hostRequestHooked = true;
-            // Game timers may stop during hibernation; this timer queues a world update.
             _deadlineTimer = new System.Threading.Timer(_ => QueueDeadlineCheck(), null, 1000, 1000);
             _layout.Remember(_directory);
             _started = true;
             Status = $"Hooks ready ({_layout.Platform})";
             _log.LogInformation("[CS2FaceitLevels] Addon has been loaded from built-in loader.");
+            QueueSendRelease();
         }
         catch (Exception ex)
         {
@@ -213,7 +201,6 @@ internal sealed class WorkshopLoader : IDisposable
     internal static bool OtherLoaderPresent() =>
         ConVar.Find("mm_client_extra_addons") != null || ConVar.Find("mm_extra_addons") != null;
 
-    // Match whole Workshop IDs without changing MAM's other addons.
     internal static bool HasBadge(string? addonList) => addonList?.Split(',',
         StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
         .Contains(AddonId, StringComparer.Ordinal) ?? false;
@@ -242,7 +229,6 @@ internal sealed class WorkshopLoader : IDisposable
     private static bool HasSameMessageMethods(nint factory, nint candidate, bool windows)
     {
         if (factory == nint.Zero || candidate == nint.Zero) return false;
-        // Skip one destructor entry on Windows, two on Linux. Compare the six primary methods.
         int first = windows ? 1 : 2;
         for (int slot = first; slot < first + 6; ++slot)
         {
@@ -279,7 +265,6 @@ internal sealed class WorkshopLoader : IDisposable
     {
         var pointer = Marshal.ReadIntPtr(owner, offset);
         if (pointer == nint.Zero) return "";
-        // Limit the ASCII read; Required() checks the Workshop IDs.
         var bytes = new List<byte>();
         for (int i = 0; i < 1024; ++i)
         {
@@ -292,24 +277,28 @@ internal sealed class WorkshopLoader : IDisposable
         throw new InvalidOperationException("Server addon string exceeds the loader limit.");
     }
 
-    // Attach before signon/map messages to avoid hooking every gameplay packet.
-    // Never attach or detach from inside a SendNetMessage callback.
     private void NeedSendHook()
     {
-        _sendSchedule.Activity(Now);
         if (_sendHooked || !Ready || !_replyHooked) return;
         NativeAPI.HookFunction(_sendFunction, _sendHandler, false);
         _sendHooked = true;
         ++_sendAttaches;
     }
 
-    // Runs on the game thread, outside SendNetMessage callbacks.
-    public void ReleaseIdleSendHook()
+    private void QueueSendRelease()
     {
-        if (!_sendHooked || !Ready || _insideMessage) return;
+        if (!_sendHooked || !Ready || _releaseQueued) return;
+        _releaseQueued = true;
+        Server.NextWorldUpdate(ReleaseSendHook);
+    }
+
+    private void ReleaseSendHook()
+    {
+        _releaseQueued = false;
+        if (!_sendHooked || !Ready || _insideMessage || _insideReply) return;
         try
         {
-            if (!_sendSchedule.CanRelease(Now, _deadlines.Count, _handshakes)) return;
+            if (!_sendSchedule.CanRelease(Now, _deadlines.Count)) return;
             NativeAPI.UnhookFunction(_sendFunction, _sendHandler, false);
             _sendHooked = false;
             if (_debug()) _log.LogInformation("[CS2FaceitLevels] Workshop SendNetMessage hook released until the next connection or map change.");
@@ -322,7 +311,7 @@ internal sealed class WorkshopLoader : IDisposable
         if (!Ready || !_replyHooked) return;
         try
         {
-            _sendSchedule.MapStarted(Now);
+            _sendSchedule.MapStarted();
             NeedSendHook();
         }
         catch (Exception ex) { Fault(ex); }
@@ -334,18 +323,15 @@ internal sealed class WorkshopLoader : IDisposable
         try
         {
             var request = hook.GetParam<nint>(1);
-            if (request == nint.Zero || Marshal.ReadInt32(request) != 2) // HSR_GAME
+            if (request == nint.Zero || Marshal.ReadInt32(request) != 2)
                 return HookResult.Continue;
 
-            // Keep the hook for the upcoming CHANGELEVEL message.
             _sendSchedule.MapChangeRequested(Now);
             NeedSendHook();
-            // Add the badge through client hooks; leave the server's addon list alone.
             if (OtherLoaderPresent()) return HookResult.Continue;
             var original = ReadAddons(request, _layout.HostStateRequestAddonsOffset);
             var required = string.Join(',', AddonHandshake.Required(original, AddonId));
             if (original == required) return HookResult.Continue;
-            // SetDirect copies the string. The request outlives this temporary buffer.
             nint utf8 = Marshal.StringToCoTaskMemUTF8(required);
             try
             {
@@ -382,7 +368,6 @@ internal sealed class WorkshopLoader : IDisposable
             var required = AddonHandshake.Required(ReadServerAddons(server), AddonId);
             string advertised = _handshakes.Reply(steamId, required, Now);
 
-            // Borrow a temporary char* for this call, then restore the engine's pointer.
             nint original = Marshal.ReadIntPtr(server, _layout.ServerAddonsOffset);
             nint replacement = Marshal.StringToCoTaskMemUTF8(advertised);
             _insideReply = true;
@@ -434,7 +419,6 @@ internal sealed class WorkshopLoader : IDisposable
                     ++_mountLists;
                     if (_debug()) _log.LogInformation("[CS2FaceitLevels] Workshop mount list: {Addons}", mountedAddons);
                 }
-                // Keep the protobuf edit; restore only the borrowed wrapper pointer.
             }
             finally { Marshal.WriteIntPtr(message.Handle, _layout.UserMessagePayloadOffset, ownedPayload); }
         }
@@ -449,11 +433,9 @@ internal sealed class WorkshopLoader : IDisposable
         try
         {
             var payload = hook.GetParam<nint>(1);
-            // Compare vtables first so gameplay packets skip decoding.
             if (payload == nint.Zero) return HookResult.Continue;
             if (!IsMessageVTable(Marshal.ReadIntPtr(payload), _signonVTable, _engineSignonVTable))
                 return HookResult.Continue;
-            _sendSchedule.Activity(Now);
             var client = hook.GetParam<nint>(0);
             var server = Marshal.ReadIntPtr(client, _layout.ClientServerOffset);
             var (steamId, slot) = Identity(client, server);
@@ -464,14 +446,12 @@ internal sealed class WorkshopLoader : IDisposable
             _insideMessage = true;
             try
             {
-                // Borrow the CNetMessage pointer through UserMessage's field at gamedata offset 0.
                 Marshal.WriteIntPtr(message.Handle, _layout.UserMessagePayloadOffset, payload);
                 int state = message.ReadInt("signon_state");
                 string addons = message.ReadString("addons");
                 string? next;
-                if (state == 7) // SIGNONSTATE_CHANGELEVEL
+                if (state == 7)
                 {
-                    // Download the destination Workshop map first.
                     next = AddonHandshake.MapChangeAddon(addons, AddonId);
                     _handshakes.ChangingMap(steamId, next, Now);
                 }
@@ -503,7 +483,6 @@ internal sealed class WorkshopLoader : IDisposable
                 }
                 finally
                 {
-                    // Restore the message before it is reused for another client.
                     message.SetInt("signon_state", state);
                     message.SetString("addons", addons);
                 }
@@ -529,10 +508,10 @@ internal sealed class WorkshopLoader : IDisposable
         if (!Ready || _getXuidFunction == nint.Zero || slot is < 0 or >= 256) return;
         try
         {
-            NeedSendHook();
-            // Check the identity again because the slot may have been reused.
             var steamId = GetClientXuid(slot);
             if (steamId == 0) return;
+            NeedSendHook();
+            _sendSchedule.Loading(slot, Now);
             Bind(slot, steamId);
             CompleteWait(slot);
             _handshakes.Connected(steamId, Now);
@@ -547,13 +526,16 @@ internal sealed class WorkshopLoader : IDisposable
         CompleteWait(slot);
         _handshakes.Active(steamId, Now);
         ++_completed;
+        _sendSchedule.Loaded(slot);
+        QueueSendRelease();
     }
 
     public void ClientDisconnect(int slot)
     {
         CompleteWait(slot);
         if (_slots.Remove(slot, out var steamId)) _handshakes.Disconnected(steamId, Now);
-        // Keep download progress, but clear this connection's deadline.
+        _sendSchedule.Loaded(slot);
+        QueueSendRelease();
     }
 
     private void Bind(int slot, ulong steamId)
@@ -571,7 +553,6 @@ internal sealed class WorkshopLoader : IDisposable
         bool expired = _deadlines.Wait(slot, steamId, Now);
         Volatile.Write(ref _waitingCount, _deadlines.Count);
         if (expired) QueueDeadlineCheck();
-        // Block replies while the expired connection waits to be disconnected.
         return expired;
     }
 
@@ -583,7 +564,6 @@ internal sealed class WorkshopLoader : IDisposable
 
     private void QueueDeadlineCheck()
     {
-        // Also called by the timer; do all native and dictionary work in the queued update.
         if (!Ready || Volatile.Read(ref _waitingCount) == 0 ||
             Interlocked.CompareExchange(ref _deadlineCheckQueued, 1, 0) != 0) return;
         Server.NextWorldUpdate(() =>
@@ -597,13 +577,13 @@ internal sealed class WorkshopLoader : IDisposable
                     if (!_deadlines.TakeExpired(pending, currentSteamId, Now)) continue;
                     _slots.Remove(pending.Slot);
                     _handshakes.Forget(pending.SteamId);
-                    // Kick through the server in this update, outside the native network callback.
                     NativeAPI.DisconnectClient(pending.Slot, (int)NetworkDisconnectionReason.NETWORK_DISCONNECT_TIMEDOUT);
                     ++_timedOut;
                     _log.LogWarning("[CS2FaceitLevels] Disconnected slot {Slot}: required Workshop handshake timed out after {Seconds}s. Reconnect and accept the download.",
                         pending.Slot, ConnectionDeadlines.TimeoutSeconds);
                 }
                 Volatile.Write(ref _waitingCount, _deadlines.Count);
+                QueueSendRelease();
             }
             catch (Exception ex) { Fault(ex); }
             finally { Interlocked.Exchange(ref _deadlineCheckQueued, 0); }
@@ -622,9 +602,15 @@ internal sealed class WorkshopLoader : IDisposable
         if (json == null) return;
         try
         {
-            var slots = _handshakes.ImportReload(json, Now, _deadlines, _sendSchedule);
+            var now = Now;
+            var slots = _handshakes.ImportReload(json, now, _deadlines, _sendSchedule);
+            var waiting = _deadlines.Snapshot().Select(x => x.Slot).ToHashSet();
             _slots.Clear();
-            foreach (var pair in slots) _slots.Add(pair.Key, pair.Value);
+            foreach (var pair in slots)
+            {
+                _slots.Add(pair.Key, pair.Value);
+                if (!waiting.Contains(pair.Key) && _handshakes.IsLoading(pair.Value)) _sendSchedule.Loading(pair.Key, now);
+            }
             Volatile.Write(ref _waitingCount, _deadlines.Count);
         }
         catch (Exception ex)
@@ -650,7 +636,6 @@ internal sealed class WorkshopLoader : IDisposable
         _faulted = true;
         Status = "Disabled: " + ex.Message;
         _log.LogError(ex, "[CS2FaceitLevels] Workshop loader disabled. FACEIT lookups remain available. {Reason}", ex.Message);
-        // Wait until the callback returns before unhooking.
         Server.NextWorldUpdate(() => { if (!_disposed && _faulted) Detach(); });
     }
 
@@ -678,7 +663,6 @@ internal sealed class WorkshopLoader : IDisposable
             NativeAPI.UnhookFunction(_hostRequestFunction, _hostRequestHandler, false);
             _hostRequestHooked = false;
         }
-        // BasePlugin does not track these hooks. Detach callbacks before releasing references.
         if (_replyReference != null) FunctionReference.Remove(_replyReference.Identifier);
         if (_sendReference != null) FunctionReference.Remove(_sendReference.Identifier);
         if (_fillServerInfoReference != null) FunctionReference.Remove(_fillServerInfoReference.Identifier);

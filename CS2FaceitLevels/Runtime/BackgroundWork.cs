@@ -2,7 +2,6 @@ using Microsoft.Extensions.Logging;
 
 namespace CS2FaceitLevels;
 
-// Tracks background jobs. Jobs must not wait for game-thread callbacks.
 internal sealed class BackgroundWork(Func<bool> debug, ILogger logger)
 {
     private readonly object _gate = new();
@@ -12,7 +11,6 @@ internal sealed class BackgroundWork(Func<bool> debug, ILogger logger)
 
     internal bool Stopping => _stop.IsCancellationRequested;
 
-    // Services take this token during Load.
     internal CancellationToken LifetimeToken => _stop.Token;
 
     internal void Run(Func<Task> action, ulong steamId = 0)

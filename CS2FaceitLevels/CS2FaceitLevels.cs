@@ -13,7 +13,7 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
 {
     public override string ModuleName => "CS2FaceitLevels";
     public override string ModuleAuthor => "✪ Stαr";
-    public override string ModuleVersion => "1.1.2";
+    public override string ModuleVersion => "1.1.3";
     public override string ModuleDescription => "Shows real FACEIT levels in the CS2 scoreboard.";
 
     private readonly PlayerSessions _sessions = new();
@@ -96,19 +96,13 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
                         _workshop?.ClientActive(player.Slot, steamId);
                 }
         }
-        // Keep the first-player reload and pass its Workshop state to the next instance.
         _reloadOnFirstConnect = !hotReload;
         AddTimer(60f, _cache.RequestMaintenance, TimerFlags.REPEAT);
-        if (_workshop != null)
-        {
-            AddTimer(30f, _workshop.Maintenance, TimerFlags.REPEAT);
-            AddTimer(1f, _workshop.ReleaseIdleSendHook, TimerFlags.REPEAT);
-        }
+        if (_workshop != null) AddTimer(30f, _workshop.Maintenance, TimerFlags.REPEAT);
         if (Config.EnableEloCommands)
         {
             AddCommand("css_elo", "Show a player's FACEIT elo.", _commands.Single);
             AddCommand("css_elos", "Show every player's FACEIT elo.", _commands.All);
-            // Warm up chat formatting without player access or FACEIT requests.
             _work.Run(() =>
             {
                 _commands.Prewarm(_chat);
@@ -116,13 +110,11 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
             });
         }
         AddTimer(2f, () => RefreshAll(force: hotReload), TimerFlags.STOP_ON_MAPCHANGE);
-        // Reattach immediately on hot reload so connecting players keep their handshake.
         if (hotReload) StartWorkshop();
     }
 
     public override void OnAllPluginsLoaded(bool hotReload)
     {
-        // Network messages are ready once all plugins have loaded.
         _workshopCanStart = true;
         StartWorkshop();
     }
@@ -149,7 +141,6 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
         if (WorkshopLoader.OtherLoaderPresent() && !WorkshopLoader.MamHasBadge())
         {
             if (_mamRegistrationPending) return;
-            // Register the badge in MAM's client list.
             _mamRegistrationPending = true;
             Server.ExecuteCommand($"mm_add_client_addon {WorkshopLoader.AddonId}");
             ConfirmMamRegistration(0);
@@ -172,7 +163,6 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
         }
         else if (attempt < 4)
         {
-            // Commands may finish later; world updates also run during hibernation.
             Server.NextWorldUpdate(() => ConfirmMamRegistration(attempt + 1));
         }
         else
@@ -204,7 +194,6 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
         {
             Logger.LogWarning(ex, "[CS2FaceitLevels] Background shutdown failed.");
         }
-        // Observe shutdown work that finishes after the timeout.
         _ = shutdown.ContinueWith(task =>
         {
             if (task.IsFaulted && Config.Debug)
@@ -258,7 +247,6 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
         {
             if (Stopping || !_sessions.IsPendingPut(slot, version)) return;
             var player = Utilities.GetPlayerFromSlot(slot);
-            // Arm protection now; PinEnforcer waits for the player's inventory.
             if (PlayerAccess.TryIdentity(player, out var steamId))
                 _sessions.GetOrAdd(slot, steamId).EnforcePin = true;
         });
@@ -281,11 +269,9 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
         if (!Stopping && PlayerAccess.TryIdentity(player, out var steamId))
         {
             var session = _sessions.GetOrAdd(player.Slot, steamId);
-            // Re-arm pin protection after a spawn or connection.
             session.EnforcePin = true;
             session.InventoryRetryAttempts = 0;
             var map = _mapGeneration;
-            // Give the inventory time to load before refreshing.
             AddTimer(delay, () =>
             {
                 if (map == _mapGeneration) RefreshSlot(session, force: false);
@@ -320,7 +306,6 @@ public sealed class CS2FaceitLevels : BasePlugin, IPluginConfig<CS2FaceitLevelsC
             _pins.Apply(session, player, cached);
             return;
         }
-        // Keep one lookup pending per session.
         if (session.RefreshPending) return;
         session.RefreshPending = true;
         var request = ++session.RefreshRequest;

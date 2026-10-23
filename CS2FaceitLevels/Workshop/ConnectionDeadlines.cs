@@ -1,6 +1,5 @@
 namespace CS2FaceitLevels.Workshop;
 
-// Game-thread state. Repeated replies do not extend a connection's deadline.
 internal sealed class ConnectionDeadlines
 {
     public const double TimeoutSeconds = 30;
@@ -25,7 +24,6 @@ internal sealed class ConnectionDeadlines
 
     public bool TakeExpired(Waiting pending, ulong currentSteamId, double now)
     {
-        // An old deadline must not disconnect a new player in the same slot.
         if (!_waiting.TryGetValue(pending.Slot, out var current) ||
             !ReferenceEquals(current, pending) || now - current.Started < TimeoutSeconds)
             return false;

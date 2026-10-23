@@ -1,6 +1,5 @@
 namespace CS2FaceitLevels.Workshop;
 
-// Save strings in AppDomain so reload state survives without keeping the old assembly alive.
 internal static class WorkshopReloadBridge
 {
     private static string Key(string directory) => "CS2FaceitLevels.Workshop.Reload:" + Path.GetFullPath(directory);

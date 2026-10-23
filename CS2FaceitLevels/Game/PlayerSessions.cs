@@ -22,7 +22,6 @@ internal sealed class PlayerSession(int slot, ulong steamId, long generation, in
     internal bool CommandPending;
 }
 
-// Updated on the game thread. Workers read session identity and Active, never game handles.
 internal sealed class PlayerSessions
 {
     private readonly Dictionary<int, PlayerSession> _bySlot = new();

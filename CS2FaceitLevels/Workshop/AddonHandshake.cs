@@ -2,7 +2,6 @@ using System.Text.Json;
 
 namespace CS2FaceitLevels.Workshop;
 
-// Game-thread state. Track downloads by Steam ID because player slots get reused.
 internal sealed class AddonHandshake
 {
     private const int MaxSessions = 256;
@@ -28,13 +27,11 @@ internal sealed class AddonHandshake
                 throw new InvalidOperationException("The engine addon list has an unexpected format.");
             if (id != badgeAddon && !result.Contains(id, StringComparer.Ordinal)) result.Add(id);
         }
-        // The badge must load last so its images override the map's assets.
         result.Add(badgeAddon);
         if (result.Count > 16) throw new InvalidOperationException("Too many addons for the Workshop loader.");
         return result.ToArray();
     }
 
-    // Use the destination map's addons. Stock maps still need the badge.
     public static string MapChangeAddon(string destinationAddons, string badgeAddon)
         => Required(destinationAddons, badgeAddon)[0];
 
@@ -42,7 +39,6 @@ internal sealed class AddonHandshake
     {
         if (_sessions.TryGetValue(steamId, out var found)) return found;
         Prune(now);
-        // Dropping old progress only asks Steam to check the addon again.
         if (_sessions.Count >= MaxSessions)
             _sessions.Remove(_sessions.OrderBy(x => x.Value.Active)
                 .ThenBy(x => x.Value.LastActivity).First().Key);
@@ -54,17 +50,14 @@ internal sealed class AddonHandshake
     public string Reply(ulong steamId, string[] required, double now)
     {
         var session = Get(steamId, now);
-        // Ask Steam to check the files again on a later visit.
         if (session.Active || now - session.LastActivity > 120)
         {
             session.Downloaded.Clear();
             session.Pending = null;
             session.Active = false;
         }
-        // Repeated replies are normal while the Workshop popup is open.
         session.LastActivity = now;
         session.Pending = required.FirstOrDefault(id => !session.Downloaded.Contains(id));
-        // CS2 downloads one missing addon at a time.
         return string.Join(',', required.Where(id => session.Downloaded.Contains(id) || id == session.Pending));
     }
 
@@ -108,16 +101,10 @@ internal sealed class AddonHandshake
     {
         if (!_sessions.TryGetValue(steamId, out var session)) return;
         if (session.Active) _sessions.Remove(steamId);
-        else session.LastActivity = now; // Keep download progress for the reconnect.
+        else session.LastActivity = now;
     }
 
-    // Downloads are in progress until player_connect_full.
-    public bool InProgress(double now, double window)
-    {
-        foreach (var session in _sessions.Values)
-            if (!session.Active && now - session.LastActivity <= window) return true;
-        return false;
-    }
+    public bool IsLoading(ulong steamId) => _sessions.TryGetValue(steamId, out var session) && !session.Active;
 
     public void Prune(double now)
     {
@@ -178,7 +165,6 @@ internal sealed class AddonHandshake
             bindings.Add(pair.Key, pair.Value);
         }
         (deadlines ?? new ConnectionDeadlines()).Restore(state.Waiting, bindings, now);
-        // Apply the snapshot only after all validation passes.
         sendSchedule?.RestoreMapChange(state.MapChangeStarted, now);
         _sessions.Clear();
         foreach (var pair in restored) _sessions.Add(pair.Key, pair.Value);

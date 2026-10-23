@@ -31,7 +31,6 @@ internal sealed class ChatFormatter
         .Replace("{LABEL_COLOR}", "{LIGHTPURPLE}", StringComparison.OrdinalIgnoreCase)
         .Replace("{ELO_COLOR}", EloColor(skill), StringComparison.OrdinalIgnoreCase);
 
-    // Insert player text after formatting the template.
     private static string EloLine(string template, string playerName, ulong steamId, FaceitData data)
     {
         var message = template

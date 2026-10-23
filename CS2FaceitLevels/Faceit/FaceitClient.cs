@@ -7,7 +7,6 @@ using Microsoft.Extensions.Logging;
 
 namespace CS2FaceitLevels;
 
-// Handles HTTP only; game entities stay on the game thread.
 internal sealed class FaceitClient(Func<CS2FaceitLevelsConfig> getConfig, ILogger logger)
 {
     private CS2FaceitLevelsConfig Config => getConfig();
@@ -50,7 +49,6 @@ internal sealed class FaceitClient(Func<CS2FaceitLevelsConfig> getConfig, ILogge
             }
             catch (FaceitApiException) when (!token.IsCancellationRequested)
             {
-                // Keep the player result if the optional ranking request fails.
             }
         }
 
@@ -200,7 +198,6 @@ internal sealed class FaceitClient(Func<CS2FaceitLevelsConfig> getConfig, ILogge
             {
                 if (length == MaxResponseBytes)
                 {
-                    // Check for extra data once the size limit is reached.
                     if (await stream.ReadAsync(buffer.AsMemory(0, 1), token) != 0)
                         throw new FaceitApiException("FACEIT API response exceeded the size limit.");
                     break;

@@ -5,7 +5,7 @@
     <Nullable>enable</Nullable>
     <LangVersion>latest</LangVersion>
     <AssemblyName>CS2FaceitLevels</AssemblyName>
-    <Version>1.1.2</Version>
+    <Version>1.1.3</Version>
     <RootNamespace>CS2FaceitLevels</RootNamespace>
     <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
   </PropertyGroup>

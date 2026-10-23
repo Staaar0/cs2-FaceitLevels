@@ -1,13 +1,10 @@
-# Build output
 bin/
 obj/
 
-# User-specific / IDE
 .vs/
 .idea/
 *.user
 *.suo
 
-# Plugin runtime state (generated on the server, not source)
 cache.json
 cache.json.tmp

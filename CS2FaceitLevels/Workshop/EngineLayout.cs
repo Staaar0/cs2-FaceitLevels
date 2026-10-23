@@ -55,7 +55,6 @@ internal sealed class EngineLayout
         if ((!OperatingSystem.IsLinux() && !OperatingSystem.IsWindows()) || System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture !=
             System.Runtime.InteropServices.Architecture.X64)
             throw new PlatformNotSupportedException("The Workshop loader requires Linux x64 or Windows x64.");
-        // Keep the loaded layout across reloads; CSS caches hooks by signature text.
         var json = AppDomain.CurrentDomain.GetData(RuntimeKey(directory)) as string ??
             File.ReadAllText(Path.Combine(directory, "workshop.gamedata.json"));
         return Parse(json,
