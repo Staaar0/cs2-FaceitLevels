@@ -3,6 +3,9 @@ name: Build CS2FaceitLevels
 on:
   push:
     branches: [ main ]
+    paths-ignore:
+      - README.md
+      - CS2FaceitLevels/workshop.gamedata.json
   workflow_dispatch:
 
 permissions:
