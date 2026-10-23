@@ -1,7 +1,7 @@
 {
   "Platforms": {
     "linux": {
-      "ReplyConnectionSignature": "55 B9 ? ? ? ? 41 B8 ? ? ? ? 48 89 E",
+      "ReplyConnectionSignature": "55 B9 ? ? ? ? 41 B8 ? ? ? ? 48 89 E5",
       "ClientVTable": "CServerSideClient",
       "SendNetMessageIndex": 16,
       "ServerAddonsOffset": 376,
