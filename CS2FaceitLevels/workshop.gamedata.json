@@ -1,14 +1,14 @@
 {
   "Platforms": {
     "linux": {
-      "ReplyConnectionSignature": "55 B9 ? ? ? ? 41 B8",
+      "ReplyConnectionSignature": "55 B9 ? ? ? ? 41 B8 FF",
       "ClientVTable": "CServerSideClient",
       "SendNetMessageIndex": 16,
       "ServerAddonsOffset": 376,
       "ClientSlotOffset": 72,
       "EngineInterface": "Source2EngineToServer001",
-      "GetClientXuidIndex": 81,
-      "GetAppIdIndex": 68,
+      "GetClientXuidIndex": 82,
+      "GetAppIdIndex": 69,
       "ClientServerOffset": 80,
       "UserMessagePayloadOffset": 0,
       "SendServerInfoSignature": "48 83 7F ? ? 0F 84 ? ? ? ? 55 48 89 E5 41 57 41 56 49 89 F6",
@@ -25,8 +25,8 @@
       "ServerAddonsOffset": 376,
       "ClientSlotOffset": 72,
       "EngineInterface": "Source2EngineToServer001",
-      "GetClientXuidIndex": 81,
-      "GetAppIdIndex": 68,
+      "GetClientXuidIndex": 82,
+      "GetAppIdIndex": 69,
       "ClientServerOffset": 80,
       "UserMessagePayloadOffset": 0,
       "SendServerInfoSignature": "48 8B C4 48 89 50 ? 48 89 48 ? 55 53 57 41 57",
