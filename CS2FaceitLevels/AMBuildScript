@@ -1,0 +1,111 @@
+import os, shutil
+
+def ResolvePath(option, env, folder):
+  if option:
+    return os.path.abspath(option)
+  if env in os.environ and os.path.isdir(os.environ[env]):
+    return os.path.abspath(os.environ[env])
+  head = os.getcwd()
+  while head:
+    candidate = os.path.join(head, folder)
+    if os.path.isdir(candidate):
+      return candidate
+    parent = os.path.dirname(head)
+    if parent == head:
+      break
+    head = parent
+  return None
+
+mms_root = ResolvePath(builder.options.mms_path, 'MMSOURCE20', 'metamod-source')
+manifests_root = ResolvePath(builder.options.hl2sdk_manifests, 'HL2SDKMANIFESTS', 'hl2sdk-manifests')
+sdk_root = ResolvePath(builder.options.hl2sdk_root, 'HL2SDKROOT', '.')
+if not mms_root:
+  raise Exception('Metamod:Source source tree not found (--mms_path)')
+if not manifests_root:
+  raise Exception('hl2sdk-manifests not found (--hl2sdk-manifests)')
+
+SdkHelpers = builder.Eval(os.path.join(manifests_root, 'SdkHelpers.ambuild'), {'Project': 'metamod'})
+
+cxx = builder.DetectCxx(target_arch='x86_64')
+
+def FindSdkPath(name):
+  path = os.path.join(sdk_root, 'hl2sdk-' + name)
+  return path if os.path.isdir(path) else None
+
+SdkHelpers.find_sdk_path = FindSdkPath
+SdkHelpers.findSdks(builder, [cxx], ['cs2'])
+if not SdkHelpers.sdk_targets:
+  raise Exception('hl2sdk-cs2 not found under ' + str(sdk_root))
+
+def HasLld():
+  return shutil.which('ld.lld') is not None or shutil.which('lld') is not None
+
+def ConfigureCxx(cxx):
+  debug = builder.options.debug == '1'
+  if cxx.like('gcc'):
+    cxx.defines += ['stricmp=strcasecmp', '_stricmp=strcasecmp', '_snprintf=snprintf', '_vsnprintf=vsnprintf',
+                    'HAVE_STDINT_H', 'GNUC']
+    cxx.cflags += ['-pipe', '-fno-strict-aliasing', '-fvisibility=hidden', '-fPIC', '-msse4.1',
+                   '-ffunction-sections', '-fdata-sections', '-Wall', '-Wno-sign-compare', '-Wno-unused',
+                   '-Wno-switch', '-Wno-unknown-pragmas', '-Wno-dangling-else']
+    cxx.cxxflags += ['-std=c++20', '-fvisibility-inlines-hidden', '-Wno-non-virtual-dtor', '-Wno-overloaded-virtual']
+    if cxx.family == 'gcc':
+      cxx.cxxflags += ['-fno-gnu-unique']
+    elif cxx.family == 'clang':
+      cxx.cxxflags += ['-Wno-implicit-exception-spec-mismatch', '-Wno-expansion-to-defined',
+                       '-Wno-inconsistent-missing-override']
+    if debug:
+      cxx.defines += ['DEBUG', '_DEBUG']
+      cxx.cflags += ['-g3', '-O0']
+    else:
+      cxx.defines += ['NDEBUG']
+      cxx.cflags += ['-O2']
+    cxx.cflags += ['-fno-omit-frame-pointer']
+
+    if cxx.target.platform == 'linux':
+      cxx.defines += ['LINUX', '_LINUX', 'POSIX', '_FILE_OFFSET_BITS=64']
+      cxx.linkflags += ['-static-libgcc', '-static-libstdc++',
+                        '-Wl,--exclude-libs,ALL', '-Wl,--gc-sections',
+                        '-Wl,--version-script=' + os.path.join(builder.sourcePath, 'exports.map')]
+      if not debug:
+        cxx.linkflags += ['-s']
+      if HasLld():
+        cxx.linkflags += ['-fuse-ld=lld', '-Wl,--no-gnu-unique']
+      cxx.postlink += ['-ldl']
+  elif cxx.like('msvc'):
+    cxx.defines += ['_CRT_SECURE_NO_DEPRECATE', '_CRT_SECURE_NO_WARNINGS', '_CRT_NONSTDC_NO_DEPRECATE',
+                    'NOMINMAX', 'WIN32', '_WINDOWS']
+    cxx.cflags += ['/W3', '/Zi', '/std:c++20', '/EHsc', '/utf-8', '/Oy-']
+    cxx.cxxflags += ['/TP']
+    if debug:
+      cxx.defines += ['DEBUG', '_DEBUG']
+      cxx.cflags += ['/Od', '/MTd']
+      cxx.linkflags += ['/NODEFAULTLIB:libcmt']
+    else:
+      cxx.defines += ['NDEBUG']
+      cxx.cflags += ['/O2', '/Zo', '/MT']
+      cxx.linkflags += ['/OPT:ICF', '/OPT:REF']
+    cxx.linkflags += ['/SUBSYSTEM:WINDOWS', 'kernel32.lib', 'user32.lib', 'advapi32.lib', 'delayimp.lib',
+                      '/DELAYLOAD:steam_api64.dll']
+
+  cxx.defines += ['META_IS_SOURCE2', 'JSON_USE_IMPLICIT_CONVERSIONS=0']
+  for manifest in SdkHelpers.sdk_manifests:
+    cxx.defines += ['SE_{}={}'.format(manifest['define'], manifest['code'])]
+  cxx.cxxincludes += [
+    builder.sourcePath,
+    os.path.join(builder.sourcePath, 'ThirdParty'),
+    os.path.join(mms_root, 'core'),
+    os.path.join(mms_root, 'third_party', 'khook', 'include'),
+  ]
+
+ConfigureCxx(cxx)
+
+class Config(object):
+  pass
+
+config = Config()
+config.sdk_target = SdkHelpers.sdk_targets[0]
+config.SdkHelpers = SdkHelpers
+config.tasks = []
+
+builder.Build(['AMBuilder', 'PackageScript'], {'config': config})

@@ -11,48 +11,151 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  METAMOD_REF: 170058a2f0dbd58106b7c76bfe88a94672295356
+  SDK_REF: 7af85664695b972e7f45e1e8a48019368fce153e
+  MANIFESTS_REF: 1600a504c89d81e15938719336b7f750b8417d47
+  AMBUILD_REF: 01212cb57c96561f664b6dfb2ee10e66de6f81e4
+
 jobs:
-  build-release:
-    name: Build and Release
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    container: ${{ matrix.container }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux
+            os: ubuntu-24.04
+            container: ghcr.io/source2ze/build-containers:steamrt3
+          - name: windows
+            os: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          path: cs2-FaceitLevels
+
+      - name: Checkout Metamod:Source
+        uses: actions/checkout@v7
+        with:
+          repository: alliedmodders/metamod-source
+          ref: ${{ env.METAMOD_REF }}
+          path: metamod-source
+          submodules: true
+
+      - name: Checkout CS2 SDK
+        uses: actions/checkout@v7
+        with:
+          repository: alliedmodders/s2sdk
+          ref: ${{ env.SDK_REF }}
+          path: hl2sdk-cs2
+
+      - name: Checkout hl2sdk-manifests
+        uses: actions/checkout@v7
+        with:
+          repository: alliedmodders/hl2sdk-manifests
+          ref: ${{ env.MANIFESTS_REF }}
+          path: hl2sdk-manifests
+
+      - name: Checkout AMBuild
+        uses: actions/checkout@v7
+        with:
+          repository: alliedmodders/ambuild
+          ref: ${{ env.AMBUILD_REF }}
+          path: ambuild
+
+      - name: Setup Python
+        if: matrix.name == 'windows'
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Build
+        shell: bash
+        run: |
+          if [ "${{ matrix.name }}" = linux ]; then
+            export CC=clang CXX=clang++
+          fi
+          export PYTHONPATH="$GITHUB_WORKSPACE/ambuild"
+          mkdir build
+          cd build
+          python ../cs2-FaceitLevels/CS2FaceitLevels/configure.py --enable-optimize \
+            --hl2sdk-root .. --hl2sdk-manifests ../hl2sdk-manifests --mms_path ../metamod-source
+          python -c "from ambuild2.run import cli_run; cli_run()"
+
+      - name: Check binary
+        if: matrix.name == 'linux'
+        shell: bash
+        run: |
+          so=build/package/addons/CS2FaceitLevels/bin/CS2FaceitLevels.so
+          newest="$(objdump -T "$so" | grep -o 'GLIBC_[0-9.]*' | sort -V | tail -1)"
+          unique="$(readelf -s --wide "$so" | grep -c UNIQUE || true)"
+          exports="$(objdump -T "$so" | grep -v '\*UND\*' | awk 'NR>4 && NF {print $NF}' | xargs)"
+          echo "newest glibc symbol: $newest"
+          echo "GNU_UNIQUE symbols: $unique"
+          echo "exported symbols: $exports"
+          test "$(printf '%s\n%s\n' "$newest" GLIBC_2.31 | sort -V | tail -1)" = GLIBC_2.31
+          test "$unique" = 0
+          test "$exports" = CreateInterface
+
+      - name: Upload
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.name }}
+          path: build/package/addons
+          if-no-files-found: error
+
+  release:
+    name: Release
+    needs: build
     runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v6
+      - name: Download builds
+        uses: actions/download-artifact@v8
         with:
-          dotnet-version: '10.0.x'
-
-      - name: Restore
-        run: dotnet restore CS2FaceitLevels/CS2FaceitLevels.csproj
-
-      - name: Build
-        run: dotnet build CS2FaceitLevels/CS2FaceitLevels.csproj -c Release --no-restore
+          path: package/addons
+          merge-multiple: true
 
       - name: Create package
         run: |
-          mkdir -p package/addons/counterstrikesharp/plugins/CS2FaceitLevels
-
-          cp CS2FaceitLevels/bin/Release/net10.0/CS2FaceitLevels.dll package/addons/counterstrikesharp/plugins/CS2FaceitLevels/
-          cp CS2FaceitLevels/bin/Release/net10.0/workshop.gamedata.json package/addons/counterstrikesharp/plugins/CS2FaceitLevels/
-
-          if [ -d CS2FaceitLevels/bin/Release/net10.0/lang ]; then
-            cp -r CS2FaceitLevels/bin/Release/net10.0/lang package/addons/counterstrikesharp/plugins/CS2FaceitLevels/
-          fi
-
+          test -f package/addons/CS2FaceitLevels/bin/CS2FaceitLevels.so
+          test -f package/addons/CS2FaceitLevels/bin/CS2FaceitLevels.dll
           cd package
           zip -r ../CS2FaceitLevels.zip addons
 
+      - name: Upload package
+        uses: actions/upload-artifact@v7
+        with:
+          path: CS2FaceitLevels.zip
+          archive: false
+          if-no-files-found: error
+
       - name: Create GitHub Release
+        if: github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
-          VERSION="$(dotnet msbuild CS2FaceitLevels/CS2FaceitLevels.csproj -getProperty:Version)"
-          TAG="v${VERSION}-${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}"
-
+          VERSION="$(sed -n 's/^#define CFL_VERSION "\(.*\)"$/\1/p' CS2FaceitLevels/CS2FaceitLevels.h)"
+          test -n "$VERSION"
+          TAG="${VERSION}-${GITHUB_RUN_NUMBER}"
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" CS2FaceitLevels.zip --clobber
+            exit 0
+          fi
           gh release create "$TAG" \
             CS2FaceitLevels.zip \
+            --target "$GITHUB_SHA" \
             --title "CS2FaceitLevels ${VERSION} (build ${GITHUB_RUN_NUMBER})" \
-            --notes "FACEIT scoreboard levels, ELO chat commands, and automatic Workshop badge downloads through MAM when installed or the built-in loader otherwise. Requires CounterStrikeSharp and Metamod."
+            --notes "FACEIT scoreboard levels and automatic Workshop badge downloads through MAM when installed or the built-in loader otherwise. Requires Metamod:Source 2.0."

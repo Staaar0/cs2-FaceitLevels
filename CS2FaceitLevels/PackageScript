@@ -1,0 +1,11 @@
+import os
+
+builder.SetBuildFolder('package')
+metamod = builder.AddFolder(os.path.join('addons', 'metamod'))
+plugin = builder.AddFolder(os.path.join('addons', 'CS2FaceitLevels'))
+bin_folder = builder.AddFolder(os.path.join('addons', 'CS2FaceitLevels', 'bin'))
+
+builder.AddCopy(os.path.join(builder.sourcePath, 'CS2FaceitLevels.vdf'), metamod)
+builder.AddCopy(os.path.join(builder.sourcePath, 'workshop.gamedata.json'), plugin)
+for task in config.tasks:
+  builder.AddCopy(task.binary, bin_folder)

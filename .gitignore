@@ -1,10 +1,5 @@
-bin/
-obj/
+build/
 
 .vs/
 .idea/
-*.user
-*.suo
-
-cache.json
-cache.json.tmp
+.vscode/

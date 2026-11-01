@@ -1,0 +1,5 @@
+"Metamod Plugin"
+{
+	"alias"	"cs2faceitlevels"
+	"file"	"addons/CS2FaceitLevels/bin/CS2FaceitLevels"
+}
