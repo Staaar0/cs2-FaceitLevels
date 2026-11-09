@@ -4,6 +4,9 @@
 
 #include <nlohmann/json.hpp>
 
+#include <array>
+#include <cstdio>
+
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -21,28 +24,46 @@ namespace {
 
 constexpr size_t kMaxBridgeBytes = 2 * 1024 * 1024;
 
+#ifndef _WIN32
+std::string ReadProcessStartTime()
+{
+	FILE *file = std::fopen("/proc/self/stat", "rb");
+	if (!file)
+		return {};
+	std::array<char, 64 * 1024> buffer{};
+	const size_t size = std::fread(buffer.data(), 1, buffer.size(), file);
+	const bool complete = std::feof(file) && !std::ferror(file);
+	std::fclose(file);
+	if (!complete)
+		return {};
+	const std::string_view stat(buffer.data(), size);
+	const size_t close = stat.rfind(')');
+	if (close == std::string_view::npos)
+		return {};
+	const auto fields = SplitNonEmpty(stat.substr(close + 1), ' ');
+	uint64_t start = 0;
+	if (fields.size() <= 19 || !ParseUint64(fields[19], start) || start == 0)
+		return {};
+	return std::to_string(start);
+}
+#endif
+
 }
 
 std::string ProcessIdentity()
 {
 #ifdef _WIN32
 	FILETIME created{}, exited{}, kernel{}, user{};
-	GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user);
+	if (!GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user))
+		return {};
 	const unsigned long long start = (static_cast<unsigned long long>(created.dwHighDateTime) << 32) | created.dwLowDateTime;
+	if (start == 0)
+		return {};
 	return std::to_string(GetCurrentProcessId()) + ":" + std::to_string(start);
 #else
-	std::string stat;
-	std::string start = "0";
-	if (ReadFile("/proc/self/stat", stat, 64 * 1024))
-	{
-		const size_t close = stat.rfind(')');
-		if (close != std::string::npos)
-		{
-			auto fields = SplitNonEmpty(std::string_view(stat).substr(close + 1), ' ');
-			if (fields.size() > 19)
-				start = std::string(fields[19]);
-		}
-	}
+	const std::string start = ReadProcessStartTime();
+	if (start.empty())
+		return {};
 	return std::to_string(getpid()) + ":" + start;
 #endif
 }
@@ -56,8 +77,9 @@ BridgeState TakeBridge(const std::string &path)
 
 	nlohmann::json root = nlohmann::json::parse(text, nullptr, false);
 	auto process = root.is_object() ? root.find("process") : root.end();
-	const bool sameProcess = root.is_object() && process != root.end() && process->is_string() &&
-		process->get<std::string>() == ProcessIdentity();
+	const std::string identity = ProcessIdentity();
+	const bool sameProcess = !identity.empty() && root.is_object() && process != root.end() && process->is_string() &&
+		process->get<std::string>() == identity;
 	if (!sameProcess)
 	{
 		RemoveFile(path);
@@ -71,14 +93,15 @@ BridgeState TakeBridge(const std::string &path)
 
 void SaveBridge(const std::string &path, const BridgeState &state)
 {
-	if (!state.runtimeGamedata)
+	const std::string identity = ProcessIdentity();
+	if (!state.runtimeGamedata || identity.empty())
 	{
 		if (FileExists(path))
 			RemoveFile(path);
 		return;
 	}
 	nlohmann::json root;
-	root["process"] = ProcessIdentity();
+	root["process"] = identity;
 	root["runtime_gamedata"] = *state.runtimeGamedata;
 	if (!WriteFileAtomic(path, root.dump()))
 		LogWarning("Could not write %s.", path.c_str());

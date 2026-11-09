@@ -3,6 +3,7 @@
 #include <khook.hpp>
 
 #include <atomic>
+#include <mutex>
 #include <utility>
 #include <vector>
 
@@ -47,14 +48,42 @@ public:
 
 	void Attach(void *address)
 	{
+		if (Detaching() && !RemovalComplete())
+			return;
 		address_ = address;
+		detaching_.store(false, std::memory_order_release);
 		active_.store(true, std::memory_order_release);
 		this->Configure(address);
 	}
 
 	void *Address() const { return address_; }
-	void Activate() override { active_.store(true, std::memory_order_release); }
+	void Activate() override
+	{
+		if (!Detaching())
+			active_.store(true, std::memory_order_release);
+	}
 	void Deactivate() override { active_.store(false, std::memory_order_release); }
+	bool Detaching() const { return detaching_.load(std::memory_order_acquire); }
+
+	bool RemovalComplete()
+	{
+		std::lock_guard<std::mutex> lock(this->_hooks_stored);
+		return this->_hook_ids.empty();
+	}
+
+	void Detach()
+	{
+		Deactivate();
+		if (detaching_.exchange(true, std::memory_order_acq_rel))
+			return;
+		std::vector<KHook::HookID_t> ids;
+		{
+			std::lock_guard<std::mutex> lock(this->_hooks_stored);
+			ids.assign(this->_hook_ids.begin(), this->_hook_ids.end());
+		}
+		for (KHook::HookID_t id : ids)
+			KHook::RemoveHook(id, true);
+	}
 
 private:
 	static KHook::Return<RET> Pre(ARGS... args) { return Dispatch(false, args...); }
@@ -73,6 +102,7 @@ private:
 	Handler post_;
 	void *address_ = nullptr;
 	std::atomic<bool> active_{false};
+	std::atomic<bool> detaching_{false};
 };
 
 template <class Owner, class CLASS, class RET, class... ARGS>

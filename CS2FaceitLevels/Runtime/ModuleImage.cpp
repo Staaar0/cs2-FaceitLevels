@@ -326,19 +326,41 @@ void *ModuleImage::FindSignature(std::string_view signature) const
 	Pattern pattern;
 	if (!ParsePattern(signature, pattern))
 		return nullptr;
-	for (const MemoryRange &range : executable_)
-		if (const uint8_t *hit = Scan(reinterpret_cast<const uint8_t *>(range.start), range.size, pattern))
-			return const_cast<uint8_t *>(hit);
+	std::string normalized;
 	if (g_detourAwareScan)
 	{
-		std::string normalized;
 		for (std::string_view token : SplitNonEmpty(signature, ' '))
 			normalized += (normalized.empty() ? "" : " ") + std::string(token);
-		for (const MemoryRange &range : executable_)
-			if (void *hit = g_detourAwareScan(reinterpret_cast<void *>(range.start), range.size, normalized.c_str()))
-				return hit;
 	}
-	return nullptr;
+
+	void *match = nullptr;
+	const size_t length = pattern.bytes.size();
+	for (const MemoryRange &range : executable_)
+	{
+		size_t offset = 0;
+		while (offset <= range.size && length <= range.size - offset)
+		{
+			const size_t remaining = range.size - offset;
+			void *hit;
+			if (g_detourAwareScan)
+			{
+				hit = g_detourAwareScan(reinterpret_cast<void *>(range.start + offset), remaining - length + 1,
+					normalized.c_str());
+			}
+			else
+				hit = const_cast<uint8_t *>(Scan(reinterpret_cast<const uint8_t *>(range.start + offset), remaining, pattern));
+			if (!hit)
+				break;
+			const uintptr_t address = reinterpret_cast<uintptr_t>(hit);
+			if (address < range.start || address - range.start < offset || address - range.start > range.size - length)
+				return nullptr;
+			if (match && match != hit)
+				return nullptr;
+			match = hit;
+			offset = static_cast<size_t>(address - range.start) + 1;
+		}
+	}
+	return match;
 }
 
 void *ModuleImage::FindVirtualTable(std::string_view className) const

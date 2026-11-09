@@ -92,15 +92,19 @@ bool IsMessageVTable(void *actual, void *factory, void *engine)
 template <typename Proto, typename Fill>
 void *FactoryVTable(const char *partialName, const char *typeName, Fill fill)
 {
-	if (!g_pNetworkMessages)
+	INetworkMessages *messages = g_pNetworkMessages;
+	if (!messages)
 		throw WorkshopError("The network messages interface is missing.");
-	INetworkMessageInternal *info = g_pNetworkMessages->FindNetworkMessagePartial(partialName);
-	CNetMessage *message = info ? info->AllocateMessage() : nullptr;
+	INetworkMessageInternal *info = messages->FindNetworkMessagePartial(partialName);
+	const auto release = [messages, info](CNetMessage *message) {
+		messages->DeallocateNetMessageAbstract(info, message);
+	};
+	std::unique_ptr<CNetMessage, decltype(release)> message(info ? info->AllocateMessage() : nullptr, release);
 	if (!message)
 		throw WorkshopError(std::string(partialName) + " payload is null.");
 
-	void *vtable = *reinterpret_cast<void **>(message);
-	Proto *proto = message->ToPB<Proto>();
+	void *vtable = *reinterpret_cast<void **>(message.get());
+	Proto *proto = message->template ToPB<Proto>();
 	bool verified = vtable && proto->GetTypeName() == typeName;
 	if (verified)
 	{
@@ -110,7 +114,6 @@ void *FactoryVTable(const char *partialName, const char *typeName, Fill fill)
 		verified = proto->SerializeAsString() == expected.SerializeAsString();
 		proto->Clear();
 	}
-	g_pNetworkMessages->DeallocateNetMessageAbstract(info, message);
 	if (!verified)
 		throw WorkshopError(std::string(partialName) + " protobuf fields could not be verified.");
 	return vtable;
@@ -274,7 +277,7 @@ void Loader::Start()
 			throw WorkshopError("Host-state request hook was not found.");
 
 		fillHook_ = ArmHook(fillHook_, fillServerInfoFunction_, nullptr, &Loader::OnFillServerInfo);
-		sendHook_ = ArmHook(sendHook_, sendFunction_, &Loader::OnSendMessage, nullptr);
+		ArmSendHook();
 		sendArmed_ = true;
 		++sendAttaches_;
 		replyHook_ = ArmHook(replyHook_, replyFunction_, &Loader::OnReply, nullptr);
@@ -361,11 +364,34 @@ std::string Loader::ReadServerAddons(void *server) const
 	throw WorkshopError("Server addon string exceeds the loader limit.");
 }
 
+void Loader::ArmSendHook()
+{
+	if (sendHook_ && sendHook_->Address() == sendFunction_ && !sendHook_->Detaching())
+	{
+		sendHook_->Activate();
+		return;
+	}
+	if (sendHook_)
+		sendHook_->Detach();
+	for (SendHook *candidate : sendHooks_)
+	{
+		if (candidate->RemovalComplete())
+		{
+			sendHook_ = candidate;
+			sendHook_->Attach(sendFunction_);
+			return;
+		}
+	}
+	sendHook_ = hooks_.Make<SendHook>(this, &Loader::OnSendMessage, nullptr);
+	sendHooks_.push_back(sendHook_);
+	sendHook_->Attach(sendFunction_);
+}
+
 void Loader::NeedSendHook()
 {
 	if (sendArmed_ || !Ready() || !armed_)
 		return;
-	sendHook_ = ArmHook(sendHook_, sendFunction_, &Loader::OnSendMessage, nullptr);
+	ArmSendHook();
 	sendArmed_ = true;
 	++sendAttaches_;
 }
@@ -391,7 +417,7 @@ void Loader::ReleaseSendHook()
 	if (!sendSchedule_.CanRelease(Now(), deadlines_.Count()))
 		return;
 	sendArmed_ = false;
-	sendHook_->Deactivate();
+	sendHook_->Detach();
 	if (debug_)
 		Log("Workshop SendNetMessage hook released until the next connection or map change.");
 }
@@ -771,9 +797,11 @@ void Loader::Fault(const std::string &reason)
 
 void Loader::Detach()
 {
-	for (KeptHook *hook : std::initializer_list<KeptHook *>{replyHook_, sendHook_, fillHook_, hostRequestHook_})
+	for (KeptHook *hook : std::initializer_list<KeptHook *>{replyHook_, fillHook_, hostRequestHook_})
 		if (hook)
 			hook->Deactivate();
+	for (SendHook *hook : sendHooks_)
+		hook->Detach();
 	armed_ = false;
 	sendArmed_ = false;
 	replyFunction_ = sendFunction_ = fillServerInfoFunction_ = hostRequestFunction_ = nullptr;

@@ -23,14 +23,16 @@ class HttpClient
 {
 public:
 	using Callback = std::function<void(const HttpResult &)>;
+	using RequestId = uint64_t;
 
 	HttpClient();
 	~HttpClient();
 
 	bool Get(const std::string &url, const std::vector<std::pair<std::string, std::string>> &headers,
-		uint32_t timeoutSeconds, size_t maxBodyBytes, Callback done);
+		uint32_t timeoutSeconds, size_t maxBodyBytes, Callback done, RequestId *id = nullptr);
 
 	static bool Available();
+	bool Cancel(RequestId id);
 	void CancelAll();
 
 private:
@@ -38,6 +40,7 @@ private:
 	void Collect();
 
 	std::list<std::unique_ptr<Request>> requests_;
+	RequestId nextId_ = 0;
 };
 
 }

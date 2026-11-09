@@ -12,6 +12,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <vector>
 
 class CNetMessage;
 class IVEngineServer2;
@@ -65,6 +66,7 @@ private:
 	std::string ReadServerAddons(void *server) const;
 	template <typename Hook>
 	Hook *ArmHook(Hook *current, void *address, typename Hook::Handler pre, typename Hook::Handler post);
+	void ArmSendHook();
 	void NeedSendHook();
 	void QueueSendRelease();
 	void ReleaseSendHook();
@@ -94,6 +96,7 @@ private:
 
 	ReplyHook *replyHook_ = nullptr;
 	SendHook *sendHook_ = nullptr;
+	std::vector<SendHook *> sendHooks_;
 	FillHook *fillHook_ = nullptr;
 	HostRequestHook *hostRequestHook_ = nullptr;
 	void *replyFunction_ = nullptr;

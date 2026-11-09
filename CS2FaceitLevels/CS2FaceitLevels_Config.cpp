@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 
 namespace cfl {
 namespace {
@@ -50,7 +51,13 @@ char NextSignificant(std::string_view text, size_t i)
 
 bool ReadInt(const nlohmann::json &value, int &out)
 {
-	if (value.is_number_integer() || value.is_number_unsigned())
+	if (value.is_number_unsigned())
+	{
+		const auto number = value.get<uint64_t>();
+		out = static_cast<int>((std::min)(number, static_cast<uint64_t>(INT32_MAX)));
+		return true;
+	}
+	if (value.is_number_integer())
 	{
 		const auto number = value.get<long long>();
 		out = static_cast<int>(std::clamp<long long>(number, INT32_MIN, INT32_MAX));

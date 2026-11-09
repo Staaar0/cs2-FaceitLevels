@@ -9,11 +9,13 @@ namespace cfl {
 
 struct HttpClient::Request
 {
+	RequestId id = 0;
 	HTTPRequestHandle handle = INVALID_HTTPREQUEST_HANDLE;
 	CCallResult<Request, HTTPRequestCompleted_t> call;
 	Callback done;
 	size_t maxBodyBytes = 0;
 	bool finished = false;
+	bool dispatching = false;
 
 	void OnCompleted(HTTPRequestCompleted_t *result, bool ioFailure)
 	{
@@ -55,9 +57,15 @@ struct HttpClient::Request
 
 		Callback callback = std::move(done);
 		done = nullptr;
+		finished = true;
+		dispatching = true;
+		struct DispatchGuard
+		{
+			bool &flag;
+			~DispatchGuard() { flag = false; }
+		} guard{dispatching};
 		if (callback)
 			callback(reply);
-		finished = true;
 	}
 };
 
@@ -75,12 +83,14 @@ bool HttpClient::Available()
 
 void HttpClient::Collect()
 {
-	requests_.remove_if([](const std::unique_ptr<Request> &request) { return request->finished; });
+	requests_.remove_if([](const std::unique_ptr<Request> &request) { return request->finished && !request->dispatching; });
 }
 
 bool HttpClient::Get(const std::string &url, const std::vector<std::pair<std::string, std::string>> &headers,
-	uint32_t timeoutSeconds, size_t maxBodyBytes, Callback done)
+	uint32_t timeoutSeconds, size_t maxBodyBytes, Callback done, RequestId *id)
 {
+	if (id)
+		*id = 0;
 	Collect();
 	ISteamHTTP *http = SteamGameServerHTTP();
 	if (!http)
@@ -104,13 +114,37 @@ bool HttpClient::Get(const std::string &url, const std::vector<std::pair<std::st
 	}
 
 	auto request = std::make_unique<Request>();
+	request->id = ++nextId_;
 	request->handle = handle;
 	request->done = std::move(done);
 	request->maxBodyBytes = maxBodyBytes;
 	request->call.SetGameserverFlag();
 	request->call.Set(call, request.get(), &Request::OnCompleted);
+	if (id)
+		*id = request->id;
 	requests_.push_back(std::move(request));
 	return true;
+}
+
+bool HttpClient::Cancel(RequestId id)
+{
+	if (!id)
+		return false;
+	for (auto it = requests_.begin(); it != requests_.end(); ++it)
+	{
+		Request &request = **it;
+		if (request.id != id)
+			continue;
+		request.call.Cancel();
+		request.done = nullptr;
+		if (ISteamHTTP *http = SteamGameServerHTTP(); http && request.handle != INVALID_HTTPREQUEST_HANDLE)
+			http->ReleaseHTTPRequest(request.handle);
+		request.finished = true;
+		if (!request.dispatching)
+			requests_.erase(it);
+		return true;
+	}
+	return false;
 }
 
 void HttpClient::CancelAll()
@@ -123,8 +157,9 @@ void HttpClient::CancelAll()
 		if (http && request->handle != INVALID_HTTPREQUEST_HANDLE)
 			http->ReleaseHTTPRequest(request->handle);
 		request->handle = INVALID_HTTPREQUEST_HANDLE;
+		request->finished = true;
 	}
-	requests_.clear();
+	requests_.remove_if([](const std::unique_ptr<Request> &request) { return !request->dispatching; });
 }
 
 }

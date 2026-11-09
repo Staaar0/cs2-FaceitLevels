@@ -62,11 +62,21 @@ bool IsSayCommand(const char *name)
 {
 	if (!name)
 		return false;
-	std::string lowered(name);
-	for (char &c : lowered)
-		if (c >= 'A' && c <= 'Z')
-			c = static_cast<char>(c - 'A' + 'a');
-	return lowered == "say" || lowered == "say_team";
+	const std::string_view command(name);
+	const auto matches = [command](std::string_view expected) {
+		if (command.size() != expected.size())
+			return false;
+		for (size_t i = 0; i < command.size(); ++i)
+		{
+			char c = command[i];
+			if (c >= 'A' && c <= 'Z')
+				c = static_cast<char>(c - 'A' + 'a');
+			if (c != expected[i])
+				return false;
+		}
+		return true;
+	};
+	return matches("say") || matches("say_team");
 }
 
 std::string_view ChatText(const CCommand &args)
@@ -169,7 +179,8 @@ private:
 	bool signaturesUpdated_ = false;
 	bool signatureUpdatePending_ = false;
 	bool ownsMamBadge_ = false;
-	bool mamAddSent_ = false;
+	bool mamAddPending_ = false;
+	uint64_t mamRequest_ = 0;
 };
 
 namespace {
@@ -243,17 +254,16 @@ bool CS2FaceitLevelsPlugin::Load(PluginId id, ISmmAPI *ismm, char *error, size_t
 			directory = ParentDirectory(bin);
 	}
 
-	auto *runtime = new Runtime(server, gameClients, engine, directory, baseDirectory, late);
+	auto runtime = std::make_unique<Runtime>(server, gameClients, engine, directory, baseDirectory, late);
 	std::string reason;
 	if (!runtime->Init(reason))
 	{
 		runtime->Shutdown();
-		delete runtime;
 		ismm->Format(error, maxlen, "%s", reason.c_str());
 		return false;
 	}
-	runtime_ = runtime;
-	g_runtime = runtime;
+	runtime_ = runtime.release();
+	g_runtime = runtime_;
 	g_SMAPI->AddListener(this, this);
 	META_CONVAR_REGISTER(FCVAR_RELEASE | FCVAR_GAMEDLL);
 	RegisterConsoleCommands();
@@ -437,7 +447,7 @@ void Runtime::Shutdown()
 void Runtime::StatusCommand()
 {
 	if (!stopping_ && workshop::Loader::OtherLoaderPresent())
-		workshop_->Start();
+		StartWorkshop();
 	META_CONPRINTF("%s\n", workshop_ ? workshop_->Summary().c_str() : "Workshop loader has not started.");
 }
 
@@ -451,7 +461,7 @@ void Runtime::ReloadCommand()
 		return;
 	if (config_.faceitApiKey != previousKey)
 	{
-		faceit_->ResetErrors();
+		faceit_->ResetForApiKeyChange();
 		cache_->DropFailures();
 	}
 	if (config_.autoUpdateSignatures && !previousAutoUpdate)
@@ -509,19 +519,33 @@ void Runtime::StartWorkshop()
 		return;
 	if (workshop::Loader::OtherLoaderPresent())
 	{
-		if (!mamAddSent_ && !workshop::Loader::MamHasBadge())
+		if (workshop::Loader::MamHasBadge())
 		{
-			mamAddSent_ = true;
-			ownsMamBadge_ = true;
+			const bool clientBadge = workshop::Loader::MamHasClientBadge();
+			ownsMamBadge_ = clientBadge && (ownsMamBadge_ || mamAddPending_);
+			mamAddPending_ = false;
+		}
+		else if (!mamAddPending_ && engine_)
+		{
+			mamAddPending_ = true;
+			ownsMamBadge_ = false;
+			const uint64_t request = ++mamRequest_;
 			engine_->ServerCommand("mm_add_client_addon 3724637448\n");
-			scheduler_->After(1.0, [this] {
-				if (!stopping_ && workshop::Loader::OtherLoaderPresent())
-					workshop_->Start();
+			scheduler_->After(1.0, [this, request] {
+				if (stopping_ || request != mamRequest_)
+					return;
+				mamAddPending_ = false;
+				ownsMamBadge_ = workshop::Loader::OtherLoaderPresent() && workshop::Loader::MamHasClientBadge();
+				workshop_->Start();
 			});
 		}
 		workshop_->Start();
 		return;
 	}
+	if (mamAddPending_)
+		++mamRequest_;
+	mamAddPending_ = false;
+	ownsMamBadge_ = false;
 	const bool updated = signaturesUpdated_;
 	signaturesUpdated_ = false;
 	if (updated && workshop_->CanRetryStartup())

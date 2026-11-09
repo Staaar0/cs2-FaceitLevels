@@ -5,8 +5,10 @@
 #include <atomic>
 #include <cstdint>
 #include <functional>
+#include <limits>
+#include <map>
 #include <mutex>
-#include <vector>
+#include <unordered_map>
 
 class ISource2Server;
 
@@ -15,11 +17,15 @@ namespace cfl {
 class Scheduler
 {
 public:
+	using TaskId = uint64_t;
+	static constexpr TaskId kInvalidTask = 0;
+
 	Scheduler(ISource2Server *server, HookKeeper &hooks);
 	~Scheduler();
 
-	void After(double seconds, std::function<void()> task);
-	void NextFrame(std::function<void()> task) { After(0.0, std::move(task)); }
+	TaskId After(double seconds, std::function<void()> task);
+	TaskId NextFrame(std::function<void()> task) { return After(0.0, std::move(task)); }
+	bool Cancel(TaskId id);
 
 	void Shutdown();
 
@@ -30,17 +36,16 @@ private:
 
 	KHook::Return<void> OnFrame(FrameHook &hook, ISource2Server *server, bool simulating, bool firstTick, bool lastTick);
 
-	struct Task
-	{
-		double due;
-		uint64_t order;
-		std::function<void()> run;
-	};
+	using Deadline = std::pair<double, TaskId>;
+	using Tasks = std::map<Deadline, std::function<void()>>;
+	void UpdateNextDue();
 
 	FrameHook *hook_ = nullptr;
 	mutable std::mutex mutex_;
-	std::vector<Task> tasks_;
-	uint64_t order_ = 0;
+	Tasks tasks_;
+	std::unordered_map<TaskId, Tasks::iterator> queued_;
+	TaskId order_ = 0;
+	std::atomic<double> nextDue_{std::numeric_limits<double>::infinity()};
 	bool running_ = false;
 	std::atomic<bool> stopped_{false};
 };

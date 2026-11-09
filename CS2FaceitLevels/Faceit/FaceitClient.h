@@ -8,7 +8,6 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 namespace cfl {
@@ -30,6 +29,7 @@ public:
 
 	void Shutdown();
 	void ResetErrors();
+	void ResetForApiKeyChange();
 
 private:
 	enum class Stage { Player, Ranking };
@@ -44,6 +44,12 @@ private:
 		std::string playerId;
 		std::string region;
 		std::string url;
+		uint64_t retryTask = 0;
+	};
+	struct Request
+	{
+		uint64_t http = 0;
+		uint64_t watchdog = 0;
 	};
 
 	void Start(const std::shared_ptr<Fetch> &fetch);
@@ -58,6 +64,7 @@ private:
 	void Complete(const std::shared_ptr<Fetch> &fetch, int level, int elo);
 	void SetBackoff(double seconds);
 	bool BackedOff() const;
+	void CancelRequests();
 
 	LevelCache &cache_;
 	HttpClient &http_;
@@ -66,8 +73,9 @@ private:
 
 	std::unordered_map<uint64_t, std::shared_ptr<Fetch>> fetching_;
 	std::deque<std::weak_ptr<Fetch>> queue_;
-	std::unordered_set<uint64_t> outstanding_;
+	std::unordered_map<uint64_t, Request> outstanding_;
 	uint64_t nextToken_ = 0;
+	uint64_t requestGeneration_ = 0;
 	int inFlight_ = 0;
 	double blockedUntil_ = 0.0;
 	bool missingKeyLogged_ = false;

@@ -35,10 +35,42 @@ FaceitService::~FaceitService()
 void FaceitService::Shutdown()
 {
 	*alive_ = false;
+	CancelRequests();
 	fetching_.clear();
 	queue_.clear();
+}
+
+void FaceitService::CancelRequests()
+{
+	++requestGeneration_;
+	for (const auto &[token, request] : outstanding_)
+	{
+		http_.Cancel(request.http);
+		scheduler_.Cancel(request.watchdog);
+	}
 	outstanding_.clear();
 	inFlight_ = 0;
+	for (const auto &[steamId, fetch] : fetching_)
+	{
+		scheduler_.Cancel(fetch->retryTask);
+		fetch->retryTask = 0;
+	}
+}
+
+void FaceitService::ResetForApiKeyChange()
+{
+	CancelRequests();
+	queue_.clear();
+	ResetErrors();
+	std::vector<std::shared_ptr<Fetch>> pending;
+	pending.reserve(fetching_.size());
+	for (const auto &[steamId, fetch] : fetching_)
+		pending.push_back(fetch);
+	for (const auto &fetch : pending)
+	{
+		fetch->elo = -1;
+		Start(fetch);
+	}
 }
 
 void FaceitService::ResetErrors()
@@ -137,15 +169,21 @@ void FaceitService::Issue(const std::shared_ptr<Fetch> &fetch)
 	}
 
 	const uint64_t token = ++nextToken_;
-	outstanding_.insert(token);
+	outstanding_.emplace(token, Request{});
 	++inFlight_;
 
 	std::weak_ptr<bool> alive = alive_;
 	std::weak_ptr<Fetch> weak = fetch;
 	auto finish = [this, alive, weak, token](const HttpResult &result) {
 		auto flag = alive.lock();
-		if (!flag || !*flag || !outstanding_.erase(token))
+		if (!flag || !*flag)
 			return;
+		auto it = outstanding_.find(token);
+		if (it == outstanding_.end())
+			return;
+		const uint64_t watchdog = it->second.watchdog;
+		outstanding_.erase(it);
+		scheduler_.Cancel(watchdog);
 		--inFlight_;
 		if (auto current = weak.lock())
 			OnReply(current, result);
@@ -157,14 +195,23 @@ void FaceitService::Issue(const std::shared_ptr<Fetch> &fetch)
 		{"Authorization", "Bearer " + config_.faceitApiKey},
 		{"Accept", "application/json"},
 	};
-	if (!http_.Get(fetch->url, headers, timeout, kMaxReplyBytes, finish))
+	HttpClient::RequestId httpId = 0;
+	if (!http_.Get(fetch->url, headers, timeout, kMaxReplyBytes, finish, &httpId))
 	{
 		HttpResult failed;
 		failed.transportFailed = true;
 		finish(failed);
 		return;
 	}
-	scheduler_.After(timeout + kWatchdogSlackSeconds, [finish] {
+	outstanding_.at(token).http = httpId;
+	outstanding_.at(token).watchdog = scheduler_.After(timeout + kWatchdogSlackSeconds, [this, alive, token, finish] {
+		auto flag = alive.lock();
+		if (!flag || !*flag)
+			return;
+		auto it = outstanding_.find(token);
+		if (it == outstanding_.end())
+			return;
+		http_.Cancel(it->second.http);
 		HttpResult failed;
 		failed.transportFailed = true;
 		finish(failed);
@@ -244,11 +291,15 @@ void FaceitService::Retry(const std::shared_ptr<Fetch> &fetch)
 {
 	std::weak_ptr<bool> alive = alive_;
 	std::weak_ptr<Fetch> weak = fetch;
-	scheduler_.After(static_cast<double>(fetch->attempt), [this, alive, weak] {
+	const uint64_t generation = requestGeneration_;
+	fetch->retryTask = scheduler_.After(static_cast<double>(fetch->attempt), [this, alive, weak, generation] {
 		auto flag = alive.lock();
 		auto current = weak.lock();
 		if (!flag || !*flag || !current)
 			return;
+		if (generation != requestGeneration_)
+			return;
+		current->retryTask = 0;
 		auto it = fetching_.find(current->steamId);
 		if (it != fetching_.end() && it->second == current)
 			Send(current);
@@ -275,6 +326,8 @@ void FaceitService::Fail(const std::shared_ptr<Fetch> &fetch, const char *reason
 
 void FaceitService::Complete(const std::shared_ptr<Fetch> &fetch, int level, int elo)
 {
+	scheduler_.Cancel(fetch->retryTask);
+	fetch->retryTask = 0;
 	auto it = fetching_.find(fetch->steamId);
 	if (it != fetching_.end() && it->second == fetch)
 		fetching_.erase(it);
