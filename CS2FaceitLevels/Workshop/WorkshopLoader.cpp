@@ -1,5 +1,6 @@
 #include "Workshop/WorkshopLoader.h"
 
+#include "Game/NetMessages.h"
 #include "Runtime/Common.h"
 #include "Runtime/ModuleImage.h"
 #include "Runtime/Scheduler.h"
@@ -28,6 +29,7 @@ constexpr int kFirstMessageMethod = 1;
 constexpr const char *kEngineModule = "libengine2.so";
 constexpr int kFirstMessageMethod = 2;
 #endif
+constexpr int kMessageMethods = 5;
 constexpr int kSignonStateChangeLevel = 7;
 
 std::optional<std::string> ConVarString(const char *name)
@@ -62,7 +64,7 @@ bool HasSameMessageMethods(void *factory, void *candidate)
 		return false;
 	auto **a = static_cast<void **>(factory);
 	auto **b = static_cast<void **>(candidate);
-	for (int slot = kFirstMessageMethod; slot < kFirstMessageMethod + 6; ++slot)
+	for (int slot = kFirstMessageMethod; slot < kFirstMessageMethod + kMessageMethods; ++slot)
 		if (!a[slot] || a[slot] != b[slot])
 			return false;
 	return true;
@@ -92,14 +94,10 @@ bool IsMessageVTable(void *actual, void *factory, void *engine)
 template <typename Proto, typename Fill>
 void *FactoryVTable(const char *partialName, const char *typeName, Fill fill)
 {
-	INetworkMessages *messages = g_pNetworkMessages;
-	if (!messages)
+	if (!g_pNetworkMessages)
 		throw WorkshopError("The network messages interface is missing.");
-	INetworkMessageInternal *info = messages->FindNetworkMessagePartial(partialName);
-	const auto release = [messages, info](CNetMessage *message) {
-		messages->DeallocateNetMessageAbstract(info, message);
-	};
-	std::unique_ptr<CNetMessage, decltype(release)> message(info ? info->AllocateMessage() : nullptr, release);
+	std::unique_ptr<CNetMessage, void (*)(CNetMessage *)> message(
+		game::AllocateNetMessage(game::FindNetMessage(partialName)), &game::FreeNetMessage);
 	if (!message)
 		throw WorkshopError(std::string(partialName) + " payload is null.");
 

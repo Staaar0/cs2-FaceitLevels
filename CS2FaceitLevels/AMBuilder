@@ -15,6 +15,7 @@ binary.sources += [
   'Faceit/FaceitParser.cpp',
   'Faceit/LevelCache.cpp',
   'Game/ChatMessage.cpp',
+  'Game/NetMessages.cpp',
   'Game/PinGuard.cpp',
   'Game/PlayerController.cpp',
   'Runtime/Common.cpp',
