@@ -1,8 +1,7 @@
 #include "Game/ChatMessage.h"
 
-#include "Game/NetMessages.h"
-
 #include <engine2/igameeventsystem.h>
+#include <interfaces/interfaces.h>
 #include <irecipientfilter.h>
 #include <networksystem/inetworkmessages.h>
 #include <shareddefs.h>
@@ -41,10 +40,10 @@ void SetGameEventSystem(IGameEventSystem *system)
 
 bool PrintToChat(int slot, const std::string &message)
 {
-	if (!g_eventSystem || slot < 0 || slot >= ABSOLUTE_PLAYER_LIMIT || message.empty())
+	if (!g_eventSystem || !g_pNetworkMessages || slot < 0 || slot >= ABSOLUTE_PLAYER_LIMIT || message.empty())
 		return false;
-	INetworkMessageInternal *type = FindNetMessage("TextMsg");
-	CNetMessage *net = AllocateNetMessage(type);
+	NetMessageInfo_t *info = g_pNetworkMessages->FindNetworkMessagePartial("TextMsg");
+	CNetMessage *net = info ? info->AllocateMessage() : nullptr;
 	if (!net)
 		return false;
 	CUserMessageTextMsg *text = net->ToPB<CUserMessageTextMsg>();
@@ -54,9 +53,9 @@ bool PrintToChat(int slot, const std::string &message)
 		text->set_dest(HUD_PRINTTALK);
 		text->add_param(message);
 		SingleRecipientFilter filter(slot);
-		g_eventSystem->PostEventAbstract(CSplitScreenSlot(-1), false, &filter, type, net, 0);
+		g_eventSystem->PostEventAbstract(CSplitScreenSlot(-1), false, &filter, info, net, 0);
 	}
-	FreeNetMessage(net);
+	delete net;
 	return sent;
 }
 

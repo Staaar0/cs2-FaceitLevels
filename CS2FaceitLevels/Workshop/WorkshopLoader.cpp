@@ -1,6 +1,5 @@
 #include "Workshop/WorkshopLoader.h"
 
-#include "Game/NetMessages.h"
 #include "Runtime/Common.h"
 #include "Runtime/ModuleImage.h"
 #include "Runtime/Scheduler.h"
@@ -94,10 +93,11 @@ bool IsMessageVTable(void *actual, void *factory, void *engine)
 template <typename Proto, typename Fill>
 void *FactoryVTable(const char *partialName, const char *typeName, Fill fill)
 {
-	if (!g_pNetworkMessages)
+	INetworkMessages *messages = g_pNetworkMessages;
+	if (!messages)
 		throw WorkshopError("The network messages interface is missing.");
-	std::unique_ptr<CNetMessage, void (*)(CNetMessage *)> message(
-		game::AllocateNetMessage(game::FindNetMessage(partialName)), &game::FreeNetMessage);
+	NetMessageInfo_t *info = messages->FindNetworkMessagePartial(partialName);
+	std::unique_ptr<CNetMessage> message(info ? info->AllocateMessage() : nullptr);
 	if (!message)
 		throw WorkshopError(std::string(partialName) + " payload is null.");
 

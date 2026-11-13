@@ -15,7 +15,6 @@ binary.sources += [
   'Faceit/FaceitParser.cpp',
   'Faceit/LevelCache.cpp',
   'Game/ChatMessage.cpp',
-  'Game/NetMessages.cpp',
   'Game/PinGuard.cpp',
   'Game/PlayerController.cpp',
   'Runtime/Common.cpp',
@@ -30,8 +29,10 @@ binary.sources += [
   'Workshop/WorkshopReloadBridge.cpp',
   os.path.join(sdk['path'], 'entity2', 'entitysystem.cpp'),
   os.path.join(sdk['path'], 'entity2', 'entityidentity.cpp'),
+  os.path.join(sdk['path'], 'entity2', 'entitykeyvalues.cpp'),
   os.path.join(sdk['path'], 'public', 'tier0', 'memoverride.cpp'),
   os.path.join(sdk['path'], 'tier0_perproject', 'convar.cpp'),
+  os.path.join(sdk['path'], 'tier0_perproject', 'keyvalues3.cpp'),
   os.path.join(sdk['path'], 'interfaces', 'interfaces.cpp'),
 ]
 
