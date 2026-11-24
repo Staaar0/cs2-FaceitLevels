@@ -21,6 +21,7 @@ binary.sources += [
   'Runtime/Hooks.cpp',
   'Runtime/HttpClient.cpp',
   'Runtime/ModuleImage.cpp',
+  'Runtime/PluginUpdater.cpp',
   'Runtime/Scheduler.cpp',
   'Workshop/AddonHandshake.cpp',
   'Workshop/EngineLayout.cpp',

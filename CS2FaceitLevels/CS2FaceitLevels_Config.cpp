@@ -189,6 +189,12 @@ bool ParseConfig(std::string_view text, Config &config, bool &hadVersion, std::s
 		config.autoUpdateSignatures = v.get<bool>();
 		return true;
 	});
+	Field(root, "AutoUpdatePlugin", "true or false", [&](const nlohmann::json &v) {
+		if (!v.is_boolean())
+			return false;
+		config.autoUpdatePlugin = v.get<bool>();
+		return true;
+	});
 
 	config.version = 0;
 	if (auto it = root.find("ConfigVersion"); it != root.end())
@@ -206,6 +212,7 @@ std::string SerializeConfig(const Config &config)
 	root["clear_pin_when_no_faceit"] = config.clearPinWhenNoFaceit;
 	root["enable_elo_commands"] = config.enableEloCommands;
 	root["AutoUpdateSignatures"] = config.autoUpdateSignatures;
+	root["AutoUpdatePlugin"] = config.autoUpdatePlugin;
 	root["ConfigVersion"] = Config::kCurrentVersion;
 	return root.dump(2) + "\n";
 }

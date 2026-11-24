@@ -32,6 +32,11 @@ csgo/addons/CS2FaceitLevels/CS2FaceitLevels.json.
   "clear_pin_when_no_faceit": false,
   "enable_elo_commands": true,
   "AutoUpdateSignatures": true,
-  "ConfigVersion": 2
+  "AutoUpdatePlugin": true,
+  "ConfigVersion": 3
 }
 ```
+
+## Auto update
+- `AutoUpdatePlugin` installs new releases by itself, restart the server to load them
+- `AutoUpdateSignatures` updates the Workshop signatures after CS2 updates

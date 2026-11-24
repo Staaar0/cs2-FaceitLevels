@@ -28,13 +28,20 @@ struct HttpClient::Request
 		ISteamHTTP *http = SteamGameServerHTTP();
 		if (http && handle != INVALID_HTTPREQUEST_HANDLE)
 		{
-			uint32 size = 0;
-			if (http->GetHTTPResponseHeaderSize(handle, "Retry-After", &size) && size > 0 && size < 256)
-			{
-				std::string value(size, '\0');
-				if (http->GetHTTPResponseHeaderValue(handle, "Retry-After", reinterpret_cast<uint8 *>(value.data()), size))
-					reply.retryAfter.assign(value.c_str(), strnlen(value.c_str(), size));
-			}
+			const auto header = [&](const char *name, uint32 limit) {
+				uint32 size = 0;
+				std::string value;
+				if (http->GetHTTPResponseHeaderSize(handle, name, &size) && size > 0 && size < limit)
+				{
+					value.resize(size);
+					if (!http->GetHTTPResponseHeaderValue(handle, name, reinterpret_cast<uint8 *>(value.data()), size))
+						value.clear();
+					value.resize(strnlen(value.c_str(), value.size()));
+				}
+				return value;
+			};
+			reply.retryAfter = header("Retry-After", 256);
+			reply.location = header("Location", 4096);
 			if (reply.status >= 200 && reply.status < 300 && result)
 			{
 				const uint32 bodySize = result->m_unBodySize;

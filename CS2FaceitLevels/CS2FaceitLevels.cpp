@@ -12,6 +12,7 @@
 #include "Runtime/Hooks.h"
 #include "Runtime/HttpClient.h"
 #include "Runtime/ModuleImage.h"
+#include "Runtime/PluginUpdater.h"
 #include "Runtime/Scheduler.h"
 #include "Workshop/SignatureUpdater.h"
 #include "Workshop/WorkshopLoader.h"
@@ -136,6 +137,7 @@ private:
 	void SyncSayHook();
 
 	void StartWorkshop();
+	void TryUpdates();
 	void TryUpdateSignatures();
 	std::vector<EloCommands::Player> HumanPlayers() const;
 
@@ -178,6 +180,7 @@ private:
 	bool workshopCanStart_ = false;
 	bool signaturesUpdated_ = false;
 	bool signatureUpdatePending_ = false;
+	double nextPluginCheck_ = 0.0;
 	bool ownsMamBadge_ = false;
 	bool mamAddPending_ = false;
 	uint64_t mamRequest_ = 0;
@@ -332,11 +335,8 @@ bool Runtime::Init(std::string &error)
 	BridgeState bridge = TakeBridge(JoinPath(directory_, ".reload-bridge.json"));
 	workshop_ = std::make_unique<workshop::Loader>(directory_, *scheduler_, hooks_, engine_, bridge.runtimeGamedata, config_.debug);
 	workshopCanStart_ = false;
-	if (config_.autoUpdateSignatures)
-	{
-		signatureUpdatePending_ = true;
-		TryUpdateSignatures();
-	}
+	signatureUpdatePending_ = config_.autoUpdateSignatures;
+	TryUpdates();
 
 	ModuleImage serverModule;
 	std::string moduleError;
@@ -465,10 +465,8 @@ void Runtime::ReloadCommand()
 		cache_->DropFailures();
 	}
 	if (config_.autoUpdateSignatures && !previousAutoUpdate)
-	{
 		signatureUpdatePending_ = true;
-		TryUpdateSignatures();
-	}
+	TryUpdates();
 	SyncSayHook();
 	Log("Reloaded CS2FaceitLevels.json.");
 	RefreshAll(false);
@@ -498,8 +496,7 @@ void Runtime::LevelInit()
 		session.inventoryRetryPending = false;
 		session.inventoryRetryAttempts = 0;
 	}
-	if (signatureUpdatePending_)
-		TryUpdateSignatures();
+	TryUpdates();
 	const uint64_t map = mapGeneration_;
 	scheduler_->After(2.0, [this, map] {
 		if (map == mapGeneration_)
@@ -554,6 +551,13 @@ void Runtime::StartWorkshop()
 		workshop_->Start();
 }
 
+void Runtime::TryUpdates()
+{
+	TryUpdateSignatures();
+	if (!stopping_ && config_.autoUpdatePlugin && Now() >= nextPluginCheck_ && UpdatePlugin(*http_, directory_, CFL_VERSION))
+		nextPluginCheck_ = Now() + 6 * 60 * 60;
+}
+
 void Runtime::TryUpdateSignatures()
 {
 	if (stopping_ || !signatureUpdatePending_)
@@ -590,8 +594,8 @@ KHook::Return<void> Runtime::OnClientFullyConnect(FullyConnectHook &, ISource2Ga
 
 KHook::Return<void> Runtime::OnSteamActivated(SteamActivatedHook &, ISource2Server *)
 {
-	if (!stopping_ && signatureUpdatePending_)
-		scheduler_->NextFrame([this] { TryUpdateSignatures(); });
+	if (!stopping_)
+		scheduler_->NextFrame([this] { TryUpdates(); });
 	return {KHook::Action::Ignore};
 }
 

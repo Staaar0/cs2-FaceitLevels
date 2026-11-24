@@ -2,7 +2,7 @@
 
 #include <ISmmPlugin.h>
 
-#define CFL_VERSION "1.1.7"
+#define CFL_VERSION "1.1.8"
 
 class Runtime;
 

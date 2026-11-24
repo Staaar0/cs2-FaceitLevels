@@ -7,7 +7,7 @@ namespace cfl {
 
 struct Config
 {
-	static constexpr int kCurrentVersion = 2;
+	static constexpr int kCurrentVersion = 3;
 	static constexpr const char *kDefaultApiKey = "PUT_YOUR_FACEIT_API_KEY_HERE";
 
 	std::string faceitApiKey = kDefaultApiKey;
@@ -17,6 +17,7 @@ struct Config
 	bool clearPinWhenNoFaceit = false;
 	bool enableEloCommands = true;
 	bool autoUpdateSignatures = true;
+	bool autoUpdatePlugin = true;
 	int version = kCurrentVersion;
 
 	bool HasApiKey() const;

@@ -17,6 +17,7 @@ struct HttpResult
 	bool tooLarge = false;
 	std::string body;
 	std::string retryAfter;
+	std::string location;
 };
 
 class HttpClient
